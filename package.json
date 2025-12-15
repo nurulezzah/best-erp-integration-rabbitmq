@@ -18,6 +18,7 @@
   "homepage": "https://github.com/nurulezzah/best-erp-integration#readme",
   "description": "",
   "dependencies": {
+    "amqplib": "^0.10.9",
     "axios": "^1.12.2",
     "express": "^5.1.0",
     "express-session": "^1.18.2",

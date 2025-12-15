@@ -1,2 +1,7 @@
 logs/
 *.log
+
+/rpc/rpc-client.js
+/rpc/rpc-server.js
+
+/certs/
