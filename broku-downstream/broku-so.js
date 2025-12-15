@@ -1,6 +1,8 @@
 const pool = require('../db');
 const axios = require('axios');
 const logger = require('../logger'); 
+const { v4: uuidv4 } = require('uuid');
+const amqp = require('amqplib');
 
 function getCurrentDateTime() {
   const now = new Date();
@@ -21,7 +23,7 @@ async function processReq(input){
   const servicetype = 'CREATE_SALES_ORDER';
 
   const query = `
-      INSERT INTO founderhq_so_downstream_input_raw (rawdata)
+      INSERT INTO broku_so_downstream_input_raw (rawdata)
       VALUES ($1::jsonb)
       RETURNING uuid;
   `;
@@ -49,7 +51,7 @@ async function processReq(input){
 
       const lowercaseInput = toLowerCaseKeys(input);
 
-      const getFormatted = await dynamicInsert(pool, 'founderhq_so_downstream_input_formatted', {
+      const getFormatted = await dynamicInsert(pool, 'broku_so_downstream_input_formatted', {
           rawuuid: rawUuid,
           ...lowercaseInput,
           sku: JSON.stringify(lowercaseInput.skulist)
@@ -61,7 +63,7 @@ async function processReq(input){
           for (const sku of lowercaseInput.skulist) {
           await pool.query(
               `
-              INSERT INTO founderhq_so_downstream_input_formatted_sku
+              INSERT INTO broku_so_downstream_input_formatted_sku
               (downstream_input_uuid, onlineordernumber, sku, payamount, quantity)
               VALUES ($1, $2, $3, $4, $5);
               `,
@@ -78,7 +80,7 @@ async function processReq(input){
 
       //need to retrieve the sku by order number
       const getSku = await pool.query(
-          `SELECT * FROM founderhq_so_downstream_input_formatted_sku WHERE onlineordernumber = $1`,
+          `SELECT * FROM broku_so_downstream_input_formatted_sku WHERE onlineordernumber = $1`,
           [lowercaseInput.onlineordernumber]
       );
 
@@ -88,7 +90,7 @@ async function processReq(input){
 
 
       // INSERT INTO DOWNSTREAM OUTPUT TABLE
-      const getOutputFormatted = await dynamicInsert(pool, 'founderhq_so_downstream_output_formatted', {
+      const getOutputFormatted = await dynamicInsert(pool, 'broku_so_downstream_output_formatted', {
           downstream_input_uuid: formattedUuid,
           ...lowercaseInput,
           sku: JSON.stringify(getSkuList),
@@ -112,7 +114,7 @@ async function processReq(input){
       delete getOutputFormatted.sku;
 
       const query2 = `
-          INSERT INTO founderhq_so_downstream_output_raw (rawdata, downstream_output_uuid)
+          INSERT INTO broku_so_downstream_output_raw (rawdata, downstream_output_uuid)
           VALUES ($1::jsonb,$2)
           RETURNING *;
       `;
@@ -122,86 +124,119 @@ async function processReq(input){
       ]
       let outputRaw = await pool.query(query2, values2);
 
-        logger.downstream.info(`Request to Upstream: ${JSON.stringify(getOutputFormatted, null, 2)}`);
+      logger.downstream.info(`Request to Upstream: ${JSON.stringify(getOutputFormatted, null, 2)}`);
 
+      // rpcClient(getOutputFormatted);
       try{
         // POST REQUEST TO BEST ERP
-        const response = await axios.post(
-          'http://127.0.0.1:3000/salesorder',
-          getOutputFormatted,
-          { headers: { 'Content-Type': 'application/json' } }
-        );
+        // const response = await axios.post(
+        //   'http://127.0.0.1:3000/salesorder',
+        //   getOutputFormatted,
+        //   { headers: { 'Content-Type': 'application/json' } }
+        // );
 
-        logger.downstream.info(`Response from BEST ERP: ${JSON.stringify(response.data, null, 2)}`);
+        const connection = await amqp.connect('amqp://localhost');
+        const channel = await connection.createChannel();
 
-        const rawRes = `
-          UPDATE founderhq_so_downstream_output_raw
-          SET rawresponse = $1,
-              response_date = $2
-          WHERE uuid = $3;
-        `;
+        // Create a temporary exclusive queue for replies
+        const { queue: replyQueue } = await channel.assertQueue('', { exclusive: true });
+        const correlationId = uuidv4();
 
-        let rawResVal = [
-          response.data,
-          getCurrentDateTime(),
-          outputRaw.rows[0].uuid
-        ];
+        return new Promise((resolve) => {
+            // Listen for the response
+            channel.consume(replyQueue, async (msg) => {
+                if (msg.properties.correlationId === correlationId) {
+                    const raw = msg.content.toString();
+                    const response = JSON.parse(raw); 
+                    console.log("response",response.data);
+                    logger.downstream.info(`Response from BEST ERP: ${JSON.stringify(response.data, null, 2)}`);
+                    const rawRes = `
+                      UPDATE broku_so_downstream_output_raw
+                      SET rawresponse = $1,
+                          response_date = $2
+                      WHERE uuid = $3;
+                    `;
 
-        await pool.query(rawRes, rawResVal);
+                    let rawResVal = [
+                      response.data,
+                      getCurrentDateTime(),
+                      outputRaw.rows[0].uuid
+                    ];
 
-
-        const baseRes = `
-          UPDATE founderhq_so_downstream_output_formatted
-          SET state = $1,
-              responsecode = $2,
-              response_date = $3
-          WHERE uuid = $4;
-        `;
-
-        let baseResVal = [
-          response.data.state,
-          response.data.responsecode,
-          getCurrentDateTime(),
-          outputFormattedUuid
-        ];
-
-        await pool.query(baseRes, baseResVal);
+                    await pool.query(rawRes, rawResVal);
 
 
-        const baseInputRes = `
-          UPDATE founderhq_so_downstream_input_formatted
-          SET state = $1,
-              responsecode = $2,
-              response_date = $3
-          WHERE uuid = $4;
-        `;
+                    const baseRes = `
+                      UPDATE broku_so_downstream_output_formatted
+                      SET state = $1,
+                          responsecode = $2,
+                          response_date = $3
+                      WHERE uuid = $4;
+                    `;
 
-        let baseInputResVal = [
-          response.data.state,
-          response.data.responsecode,
-          getCurrentDateTime(),
-          formattedUuid
-        ];
+                    let baseResVal = [
+                      response.data.state,
+                      response.data.responsecode,
+                      getCurrentDateTime(),
+                      outputFormattedUuid
+                    ];
 
-        await pool.query(baseInputRes, baseInputResVal);
+                    await pool.query(baseRes, baseResVal);
 
 
-        const rawInputRes = `
-          UPDATE founderhq_so_downstream_input_raw
-          SET rawresponse = $1,
-              response_date = $2
-          WHERE uuid = $3;
-        `;
+                    const baseInputRes = `
+                      UPDATE broku_so_downstream_input_formatted
+                      SET state = $1,
+                          responsecode = $2,
+                          response_date = $3
+                      WHERE uuid = $4;
+                    `;
 
-        let rawInputResVal = [
-          response.data,
-          getCurrentDateTime(),
-          rawUuid
-        ];
+                    let baseInputResVal = [
+                      response.data.state,
+                      response.data.responsecode,
+                      getCurrentDateTime(),
+                      formattedUuid
+                    ];
 
-        await pool.query(rawInputRes, rawInputResVal);
+                    await pool.query(baseInputRes, baseInputResVal);
 
-        return await response.data;
+
+                    const rawInputRes = `
+                      UPDATE broku_so_downstream_input_raw
+                      SET rawresponse = $1,
+                          response_date = $2
+                      WHERE uuid = $3;
+                    `;
+
+                    let rawInputResVal = [
+                      response.data,
+                      getCurrentDateTime(),
+                      rawUuid
+                    ];
+
+                    await pool.query(rawInputRes, rawInputResVal);
+
+                    resolve(response.data);
+                    setTimeout(() => {
+                        connection.close();
+                    }, 500);
+                }
+            }, { noAck: true });
+
+            // Send the request
+            channel.sendToQueue(
+                'sales_order',
+                Buffer.from(JSON.stringify(getOutputFormatted)),
+                {
+                    correlationId: correlationId,
+                    replyTo: replyQueue
+                }
+            );
+        });
+
+
+        
 
       }catch (err) {
         logger.downstream.error('Error at post data to upstream:', err);
@@ -217,7 +252,7 @@ async function processReq(input){
       };
 
       const rawInputRes = `
-        UPDATE founderhq_so_downstream_input_raw
+        UPDATE broku_so_downstream_input_raw
         SET rawresponse = $1,
             response_date = $2
         WHERE uuid = $3;
@@ -289,6 +324,10 @@ async function dynamicInsert(pool, tableName, data) {
   const q = `INSERT INTO ${tableName} (${fields}) VALUES (${placeholders}) RETURNING *;`;
   const res = await pool.query(q, values);
   return res.rows[0]; // return full inserted row
+}
+
+async function rpcClient(n) {
+    
 }
 
 module.exports = { processReq };

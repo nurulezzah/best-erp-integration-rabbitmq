@@ -1,6 +1,9 @@
 const pool = require('../db');
 const axios = require('axios');
 const logger = require('../logger'); 
+const { v4: uuidv4 } = require('uuid');
+const amqp = require('amqplib');
+
 
 function getCurrentDateTime() {
   const now = new Date();
@@ -94,82 +97,114 @@ async function checkOrderStatus(input){
 
       try{
         // POST REQUEST TO BEST ERP
-        const response = await axios.post(
-          'http://127.0.0.1:3000/checkorder',
-          dsReq,
-          { headers: { 'Content-Type': 'application/json' } }
-        );
+        // const response = await axios.post(
+        //   'http://127.0.0.1:3000/checkorder',
+        //   dsReq,
+        //   { headers: { 'Content-Type': 'application/json' } }
+        // );
 
-        logger.downstream.info(`Response from BEST ERP: ${JSON.stringify(response.data, null, 2)}`);
+        const connection = await amqp.connect('amqp://localhost');
+        const channel = await connection.createChannel();
 
-        const rawRes = `
-          UPDATE broku_co_downstream_output_raw
-          SET rawresponse = $1,
-              response_date = $2
-          WHERE uuid = $3;
-        `;
+        // Create a temporary exclusive queue for replies
+        const { queue: replyQueue } = await channel.assertQueue('', { exclusive: true });
+        const correlationId = uuidv4();
 
-        let rawResVal = [
-          response.data,
-          getCurrentDateTime(),
-          outputRawUuid
-        ];
+        return new Promise((resolve) => {
+          // Listen for the response
+          channel.consume(replyQueue, async (msg) => {
+            if (msg.properties.correlationId === correlationId) {
+              const raw = msg.content.toString();
+              const response = JSON.parse(raw); 
+              console.log("response",response.data);
+              logger.downstream.info(`Response from BEST ERP: ${JSON.stringify(response.data, null, 2)}`);
 
-        await pool.query(rawRes, rawResVal);
+              const rawRes = `
+                UPDATE broku_co_downstream_output_raw
+                SET rawresponse = $1,
+                    response_date = $2
+                WHERE uuid = $3;
+              `;
 
+              let rawResVal = [
+                response.data,
+                getCurrentDateTime(),
+                outputRawUuid
+              ];
 
-        const baseRes = `
-          UPDATE broku_co_downstream_output_formatted
-          SET state = $1,
-              responsecode = $2,
-              response_date = $3
-          WHERE uuid = $4;
-        `;
-
-        let baseResVal = [
-          response.data.state,
-          response.data.responsecode,
-          getCurrentDateTime(),
-          outputFormattedUuid
-        ];
-
-        await pool.query(baseRes, baseResVal);
+              await pool.query(rawRes, rawResVal);
 
 
-        const baseInputRes = `
-          UPDATE broku_co_downstream_input_formatted
-          SET state = $1,
-              responsecode = $2,
-              response_date = $3
-          WHERE uuid = $4;
-        `;
+              const baseRes = `
+                UPDATE broku_co_downstream_output_formatted
+                SET state = $1,
+                    responsecode = $2,
+                    response_date = $3
+                WHERE uuid = $4;
+              `;
 
-        let baseInputResVal = [
-          response.data.state,
-          response.data.responsecode,
-          getCurrentDateTime(),
-          formattedUuid
-        ];
+              let baseResVal = [
+                response.data.state,
+                response.data.responsecode,
+                getCurrentDateTime(),
+                outputFormattedUuid
+              ];
 
-        await pool.query(baseInputRes, baseInputResVal);
+              await pool.query(baseRes, baseResVal);
 
 
-        const rawInputRes = `
-          UPDATE broku_co_downstream_input_raw
-          SET rawresponse = $1,
-              response_date = $2
-          WHERE uuid = $3;
-        `;
+              const baseInputRes = `
+                UPDATE broku_co_downstream_input_formatted
+                SET state = $1,
+                    responsecode = $2,
+                    response_date = $3
+                WHERE uuid = $4;
+              `;
 
-        let rawInputResVal = [
-          response.data,
-          getCurrentDateTime(),
-          rawUuid
-        ];
+              let baseInputResVal = [
+                response.data.state,
+                response.data.responsecode,
+                getCurrentDateTime(),
+                formattedUuid
+              ];
 
-        await pool.query(rawInputRes, rawInputResVal);
+              await pool.query(baseInputRes, baseInputResVal);
 
-        return await response.data;
+
+              const rawInputRes = `
+                UPDATE broku_co_downstream_input_raw
+                SET rawresponse = $1,
+                    response_date = $2
+                WHERE uuid = $3;
+              `;
+
+              let rawInputResVal = [
+                response.data,
+                getCurrentDateTime(),
+                rawUuid
+              ];
+
+              await pool.query(rawInputRes, rawInputResVal);
+
+              resolve(response.data);
+              setTimeout(() => {
+                  connection.close();
+              }, 500);
+            }
+          }, { noAck: true });
+
+          // Send the request
+          channel.sendToQueue(
+              'check_order',
+              Buffer.from(JSON.stringify(dsReq)),
+              {
+                  correlationId: correlationId,
+                  replyTo: replyQueue
+              }
+          );
+        });
+
+        
 
       } catch (err) {
         logger.downstream.error('Error at post data to upstream:', err);
