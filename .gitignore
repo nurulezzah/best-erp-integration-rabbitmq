@@ -5,3 +5,5 @@ logs/
 /rpc/rpc-server.js
 
 /certs/
+
+fake-erp.js
