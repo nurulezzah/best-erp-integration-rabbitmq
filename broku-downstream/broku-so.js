@@ -135,7 +135,9 @@ async function processReq(input){
         //   { headers: { 'Content-Type': 'application/json' } }
         // );
 
-        const connection = await amqp.connect('amqp://localhost');
+        // const RABBIT_URL = 'amqp://ezzah:afm01@127.0.0.1:5672/';
+        const RABBIT_URL = 'amqp://localhost';
+        const connection = await amqp.connect(RABBIT_URL);
         const channel = await connection.createChannel();
 
         // Create a temporary exclusive queue for replies

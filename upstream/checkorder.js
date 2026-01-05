@@ -448,8 +448,62 @@ async function checkStatus(input){
         }
 
     }catch (err) {
-        logger.upstream.error("Error in reqToERP:", err.message);
+        
+        // Axios timeout
+        if (err.code === 'ECONNABORTED') {
+            logger.upstream.error('ERP request timeout');
 
+            const formatted_res = {
+                state: "failure",
+                responsecode: "1", 
+                response_date: getCurrentDateTime()
+            };
+
+            // Update upstream formatted table
+            const upstreamQue = `
+                UPDATE co_upstream_input_formatted
+                SET state = $1,
+                    responsecode = $2,
+                    response_date = $3
+                WHERE uuid = $4
+                RETURNING rawuuid;
+            `;
+
+            const upstreamVal = [
+                formatted_res.state,
+                formatted_res.responsecode,
+                formatted_res.response_date,
+                uuid
+            ];
+
+            const queryUuid = await pool.query(upstreamQue, upstreamVal);
+            const rawUuid = queryUuid.rows[0].rawuuid;
+
+            // Update raw response
+            const rawRes = `
+                UPDATE co_upstream_input_raw
+                SET rawresponse = $1::jsonb,
+                    response_date = $2
+                WHERE uuid = $3;
+            `;
+
+            await pool.query(rawRes, [
+                JSON.stringify(formatted_res),
+                formatted_res.response_date,
+                rawUuid
+            ]);
+
+            return formatted_res;
+        }
+
+        if (err.response) {
+            logger.upstream.error(
+                'ERP error response:',
+                JSON.stringify(err.response.data)
+            );
+        } else {
+            logger.upstream.error('ERP request failed:', err.message);
+        }
     }
     
 }
