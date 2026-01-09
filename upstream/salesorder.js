@@ -296,6 +296,7 @@ async function reqToERP(data, uuid) {
     // POST REQUEST TO BEST ERP
     const response = await axios.post(
       'https://www.qianyierp.com/api/v1/salesOrder', // replace with ERP URL
+      // 'http://localhost:3001/api/v1/salesOrder',
       form,
       { headers: form.getHeaders(),
         timeout: 36000
@@ -365,15 +366,6 @@ async function reqToERP(data, uuid) {
   
           // INSERT INTO so_result_tag
           await dynamicInsert(pool, 'so_result_tag', {onlineordernumber, ...newData.tag});
-  
-  
-          //  SKULIST CAN LOOP THRU TO INSERT
-          // const res = await pool.query(
-          //   `SELECT column_name
-          //     FROM information_schema.columns
-          //     WHERE  table_name   = $1`,
-          //   ['so_result_sku']
-          // );
   
           const skulist = toLowerCaseKeys(a.result.skuList);
   
@@ -611,6 +603,22 @@ async function reqToERP(data, uuid) {
         rawUuid
       ]);
 
+      const baseRes = `
+       UPDATE so_base_req
+        SET state = $1,
+            bizcontent = $2::jsonb,
+            response_date = $3
+        WHERE uuid = $4;
+      `;
+
+      let baseResVal = [
+        formatted_res.state,
+        formatted_res,
+        formatted_res.response_date,
+        data.uuid
+      ];
+
+      await pool.query(baseRes, baseResVal);
       return formatted_res;
     }
 
