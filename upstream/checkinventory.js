@@ -150,6 +150,8 @@ async function checkOrderStatus(input) {
         // POST REQUEST TO BEST ERP
         const response = await axios.post(
         'https://www.qianyierp.com/api/v1/inventory', // replace with ERP URL
+        // 'http://localhost:3001/api/v1/salesOrder',
+
         form,
         { headers: form.getHeaders() }
         );
@@ -463,7 +465,7 @@ async function checkOrderStatus(input) {
             formatted_res.state,
             formatted_res.responsecode,
             formatted_res.response_date,
-            uuid
+            formattedUuid
         ];
 
         const queryUuid = await pool.query(upstreamQue, upstreamVal);
@@ -483,6 +485,22 @@ async function checkOrderStatus(input) {
             rawUuid
         ]);
 
+        const baseRes = `
+        UPDATE inv_base_req
+            SET state = $1,
+                bizcontent = $2::jsonb,
+                response_date = $3
+            WHERE uuid = $4;
+        `;
+
+        let baseResVal = [
+            formatted_res.state,
+            formatted_res,
+            formatted_res.response_date,
+            baseReqUuid
+        ];
+
+        await pool.query(baseRes, baseResVal);
         return formatted_res;
         }
 

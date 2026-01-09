@@ -21,7 +21,6 @@ function getCurrentDateTime() {
 async function processReq(input){
   const appid = 60163222354;
   const servicetype = 'CREATE_SALES_ORDER';
-  const RPC_TIMEOUT_MS = 38000; // 38 seconds
 
   const query = `
       INSERT INTO broku_so_downstream_input_raw (rawdata)
@@ -145,206 +144,309 @@ async function processReq(input){
         const { queue: replyQueue } = await channel.assertQueue('', { exclusive: true });
         const correlationId = uuidv4();
 
-        // return new Promise((resolve) => {
-        //     // Listen for the response
-        //     channel.consume(replyQueue, async (msg) => {
-        //         if (msg.properties.correlationId === correlationId) {
-        //             const raw = msg.content.toString();
-        //             const response = JSON.parse(raw); 
-        //             console.log("response",response.data);
-        //             logger.downstream.info(`Response from BEST ERP: ${JSON.stringify(response.data, null, 2)}`);
-        //             const rawRes = `
-        //               UPDATE broku_so_downstream_output_raw
-        //               SET rawresponse = $1,
-        //                   response_date = $2
-        //               WHERE uuid = $3;
-        //             `;
-
-        //             let rawResVal = [
-        //               response.data,
-        //               getCurrentDateTime(),
-        //               outputRaw.rows[0].uuid
-        //             ];
-
-        //             await pool.query(rawRes, rawResVal);
-
-
-        //             const baseRes = `
-        //               UPDATE broku_so_downstream_output_formatted
-        //               SET state = $1,
-        //                   responsecode = $2,
-        //                   response_date = $3
-        //               WHERE uuid = $4;
-        //             `;
-
-        //             let baseResVal = [
-        //               response.data.state,
-        //               response.data.responsecode,
-        //               getCurrentDateTime(),
-        //               outputFormattedUuid
-        //             ];
-
-        //             await pool.query(baseRes, baseResVal);
-
-
-        //             const baseInputRes = `
-        //               UPDATE broku_so_downstream_input_formatted
-        //               SET state = $1,
-        //                   responsecode = $2,
-        //                   response_date = $3
-        //               WHERE uuid = $4;
-        //             `;
-
-        //             let baseInputResVal = [
-        //               response.data.state,
-        //               response.data.responsecode,
-        //               getCurrentDateTime(),
-        //               formattedUuid
-        //             ];
-
-        //             await pool.query(baseInputRes, baseInputResVal);
-
-
-        //             const rawInputRes = `
-        //               UPDATE broku_so_downstream_input_raw
-        //               SET rawresponse = $1,
-        //                   response_date = $2
-        //               WHERE uuid = $3;
-        //             `;
-
-        //             let rawInputResVal = [
-        //               response.data,
-        //               getCurrentDateTime(),
-        //               rawUuid
-        //             ];
-
-        //             await pool.query(rawInputRes, rawInputResVal);
-
-        //             resolve(response.data);
-        //             setTimeout(() => {
-        //                 connection.close();
-        //             }, 500);
-        //         }
-        //     }, { noAck: true });
-
-        //     // Send the request
-        //     channel.sendToQueue(
-        //         'sales_order',
-        //         Buffer.from(JSON.stringify(getOutputFormatted)),
-        //         {
-        //             correlationId: correlationId,
-        //             replyTo: replyQueue
-        //         }
-        //     );
-        // });
-
-        return new Promise(async (resolve, reject) => {
-          let timeoutHandle;
+        return new Promise(async (resolve) => {
           let consumerTag;
+          let timeoutHandle;
 
           const cleanup = async () => {
-              clearTimeout(timeoutHandle);
-              try {
-                  if (consumerTag) await channel.cancel(consumerTag);
-                  await channel.close();
-                  await connection.close();
-              } catch (e) {
-                  // ignore cleanup errors
-              }
+            try {
+              if (timeoutHandle) clearTimeout(timeoutHandle);
+              if (consumerTag) await channel.cancel(consumerTag);
+              await channel.close();
+              await connection.close();
+            } catch (err) {
+              console.error("Cleanup error:", err.message);
+            }
           };
 
-          // 38s TIMEOUT (DOWNSTREAM protection)
-          timeoutHandle = setTimeout(async () => {
-              logger.downstream.error('ERP timeout after 38s');
+          const consumeResult = await channel.consume(
+            replyQueue,
+            async (msg) => {
+              if (!msg) return;
 
-              const timeoutResponse = {
-                  state: 'fail',
-                  responsecode: 1,
-                  responsedate: getCurrentDateTime()
+              if (msg.properties.correlationId === correlationId) {
+                clearTimeout(timeoutHandle); 
+
+                try {
+                  const raw = msg.content.toString();
+                  const response = JSON.parse(raw);
+                  
+                  logger.downstream.info(
+                    `Response from BEST ERP: ${JSON.stringify(response.data, null, 2)}`
+                  );
+
+                  // ---- DB Updates ----
+
+                  const rawRes = `
+                    UPDATE broku_so_downstream_output_raw
+                    SET rawresponse = $1,
+                        response_date = $2
+                    WHERE uuid = $3;
+                  `;
+                  await pool.query(rawRes, [
+                    response.data,
+                    getCurrentDateTime(),
+                    outputRaw.rows[0].uuid
+                  ]);
+
+                  const baseRes = `
+                    UPDATE broku_so_downstream_output_formatted
+                    SET state = $1,
+                        responsecode = $2,
+                        response_date = $3
+                    WHERE uuid = $4;
+                  `;
+                  await pool.query(baseRes, [
+                    response.data.state,
+                    response.data.responsecode,
+                    getCurrentDateTime(),
+                    outputFormattedUuid
+                  ]);
+
+                  const baseInputRes = `
+                    UPDATE broku_so_downstream_input_formatted
+                    SET state = $1,
+                        responsecode = $2,
+                        response_date = $3
+                    WHERE uuid = $4;
+                  `;
+                  await pool.query(baseInputRes, [
+                    response.data.state,
+                    response.data.responsecode,
+                    getCurrentDateTime(),
+                    formattedUuid
+                  ]);
+
+                  const rawInputRes = `
+                    UPDATE broku_so_downstream_input_raw
+                    SET rawresponse = $1,
+                        response_date = $2
+                    WHERE uuid = $3;
+                  `;
+                  await pool.query(rawInputRes, [
+                    response.data,
+                    getCurrentDateTime(),
+                    rawUuid
+                  ]);
+
+                  resolve(response.data);
+
+                } catch (err) {
+                  console.error("Error processing consumer response:", err.message);
+
+                  const failResponse = {
+                    state: 'failure',
+                    responsecode: 1,
+                    responsedate: getCurrentDateTime()
+                  };
+
+                  // ---- KEEP rawRes ----
+                  const rawRes = `
+                    UPDATE broku_so_downstream_output_raw
+                    SET rawresponse = $1,
+                        response_date = $2
+                    WHERE uuid = $3;
+                  `;
+                  await pool.query(rawRes, [
+                    failResponse,
+                    getCurrentDateTime(),
+                    outputRaw.rows[0].uuid
+                  ]);
+
+                  const baseRes = `
+                    UPDATE broku_so_downstream_output_formatted
+                    SET state = $1,
+                        responsecode = $2,
+                        response_date = $3
+                    WHERE uuid = $4;
+                  `;
+                  await pool.query(baseRes, [
+                    'failure',
+                    1,
+                    getCurrentDateTime(),
+                    outputFormattedUuid
+                  ]);
+
+                  const baseInputRes = `
+                    UPDATE broku_so_downstream_input_formatted
+                    SET state = $1,
+                        responsecode = $2,
+                        response_date = $3
+                    WHERE uuid = $4;
+                  `;
+                  await pool.query(baseInputRes, [
+                    'failure',
+                    1,
+                    getCurrentDateTime(),
+                    formattedUuid
+                  ]);
+
+                  const rawInputRes = `
+                    UPDATE broku_so_downstream_input_raw
+                    SET rawresponse = $1,
+                        response_date = $2
+                    WHERE uuid = $3;
+                  `;
+                  await pool.query(rawInputRes, [
+                    failResponse,
+                    getCurrentDateTime(),
+                    rawUuid
+                  ]);
+
+                  resolve(failResponse);
+
+                } finally {
+                  await cleanup();
+                }
+              }
+            },
+            { noAck: true }
+          );
+
+          consumerTag = consumeResult.consumerTag;
+
+          // ---- Send request to queue ----
+          try {
+            channel.sendToQueue(
+              'sales_order', // queue name
+              Buffer.from(JSON.stringify(getOutputFormatted)),
+              { correlationId, replyTo: replyQueue,expiration: '39000' }
+            );
+
+            // START 38-SECOND TIMEOUT ONLY AFTER SEND SUCCESS
+            timeoutHandle = setTimeout(async () => {
+              logger.downstream.error('RabbitMQ RPC timeout after 38 seconds');
+
+              const failResponse = {
+                state: 'failure',
+                responsecode: 1,
+                responsedate: getCurrentDateTime()
               };
 
-              // ---- Update DB as TIMEOUT ----
-              await pool.query(
-                  `
-                  UPDATE broku_so_downstream_output_formatted
-                  SET state = $1,
-                      responsecode = $2,
-                      response_date = $3
-                  WHERE uuid = $4;
-                  `,
-                  ['fail', 1, getCurrentDateTime(), outputFormattedUuid]
-              );
+              // ---- KEEP rawRes ----
+              const rawRes = `
+                UPDATE broku_so_downstream_output_raw
+                SET rawresponse = $1,
+                    response_date = $2
+                WHERE uuid = $3;
+              `;
+              await pool.query(rawRes, [
+                failResponse,
+                getCurrentDateTime(),
+                outputRaw.rows[0].uuid
+              ]);
 
-              await pool.query(
-                  `
-                  UPDATE broku_so_downstream_input_formatted
-                  SET state = $1,
-                      responsecode = $2,
-                      response_date = $3
-                  WHERE uuid = $4;
-                  `,
-                  ['fail', 1, getCurrentDateTime(), formattedUuid]
-              );
+              const baseRes = `
+                UPDATE broku_so_downstream_output_formatted
+                SET state = $1,
+                    responsecode = $2,
+                    response_date = $3
+                WHERE uuid = $4;
+              `;
+              await pool.query(baseRes, [
+                'failure',
+                1,
+                getCurrentDateTime(),
+                outputFormattedUuid
+              ]);
 
-              await pool.query(
-                  `
-                  UPDATE broku_so_downstream_input_raw
-                  SET rawresponse = $1,
-                      response_date = $2
-                  WHERE uuid = $3;
-                  `,
-                  [timeoutResponse, getCurrentDateTime(), rawUuid]
-              );
+              const baseInputRes = `
+                UPDATE broku_so_downstream_input_formatted
+                SET state = $1,
+                    responsecode = $2,
+                    response_date = $3
+                WHERE uuid = $4;
+              `;
+              await pool.query(baseInputRes, [
+                'failure',
+                1,
+                getCurrentDateTime(),
+                formattedUuid
+              ]);
+
+              const rawInputRes = `
+                UPDATE broku_so_downstream_input_raw
+                SET rawresponse = $1,
+                    response_date = $2
+                WHERE uuid = $3;
+              `;
+              await pool.query(rawInputRes, [
+                failResponse,
+                getCurrentDateTime(),
+                rawUuid
+              ]);
 
               await cleanup();
+              resolve(failResponse);
 
-              resolve(timeoutResponse); 
-          }, RPC_TIMEOUT_MS);
+            }, 39000); // 39 seconds
 
-          // 👂 Listen for ERP response
-          const consumeResult = await channel.consume(
-              replyQueue,
-              async (msg) => {
-                  if (!msg) return;
+          } catch (err) {
+            console.error("Failed to send to queue:", err.message);
 
-                  if (msg.properties.correlationId === correlationId) {
-                      clearTimeout(timeoutHandle);
+            const failResponse = {
+              state: 'failure',
+              responsecode: 1,
+              responsedate: getCurrentDateTime()
+            };
 
-                      try {
-                          const raw = msg.content.toString();
-                          const response = JSON.parse(raw);
+            // ---- ORIGINAL FAILURE HANDLING (UNCHANGED) ----
+            const rawRes = `
+              UPDATE broku_so_downstream_output_raw
+              SET rawresponse = $1,
+                  response_date = $2
+              WHERE uuid = $3;
+            `;
+            await pool.query(rawRes, [
+              failResponse,
+              getCurrentDateTime(),
+              outputRaw.rows[0].uuid
+            ]);
 
-                          logger.downstream.info(
-                              `Response from BEST ERP: ${JSON.stringify(response.data, null, 2)}`
-                          );
+            const baseRes = `
+              UPDATE broku_so_downstream_output_formatted
+              SET state = $1,
+                  responsecode = $2,
+                  response_date = $3
+              WHERE uuid = $4;
+            `;
+            await pool.query(baseRes, [
+              'failure',
+              1,
+              getCurrentDateTime(),
+              outputFormattedUuid
+            ]);
 
-                          await pool.query(rawRes, rawResVal);
-                          await pool.query(baseRes, baseResVal);
-                          await pool.query(baseInputRes, baseInputResVal);
-                          await pool.query(rawInputRes, rawInputResVal);
+            const baseInputRes = `
+              UPDATE broku_so_downstream_input_formatted
+              SET state = $1,
+                  responsecode = $2,
+                  response_date = $3
+              WHERE uuid = $4;
+            `;
+            await pool.query(baseInputRes, [
+              'failure',
+              1,
+              getCurrentDateTime(),
+              formattedUuid
+            ]);
 
-                          resolve(response.data);
-                      } catch (err) {
-                          reject(err);
-                      } finally {
-                          await cleanup();
-                      }
-                    }
-                },
-                { noAck: true }
-            );
+            const rawInputRes = `
+              UPDATE broku_so_downstream_input_raw
+              SET rawresponse = $1,
+                  response_date = $2
+              WHERE uuid = $3;
+            `;
+            await pool.query(rawInputRes, [
+              failResponse,
+              getCurrentDateTime(),
+              rawUuid
+            ]);
 
-            consumerTag = consumeResult.consumerTag;
+            await cleanup();
+            resolve(failResponse);
+          }
 
-            // Send request to ERP
-            channel.sendToQueue(
-                'sales_order',
-                Buffer.from(JSON.stringify(getOutputFormatted)),
-                {
-                    correlationId,
-                    replyTo: replyQueue
-                }
-            );
         });
 
       }catch (err) {
