@@ -1,4 +1,10 @@
 const pool = require('../db');
+const path = require('path');
+const loadConfig = require('../config/envLoader');
+
+const configPath = path.resolve(__dirname, '../config/app.conf');
+const config = loadConfig(configPath);
+
 const axios = require('axios');
 const logger = require('../logger'); 
 const { v4: uuidv4 } = require('uuid');
@@ -126,20 +132,15 @@ async function processReq(input){
 
       logger.downstream.info(`Request to Upstream: ${JSON.stringify(getOutputFormatted, null, 2)}`);
 
-      // rpcClient(getOutputFormatted);
       try{
-        // POST REQUEST TO BEST ERP
-        // const response = await axios.post(
-        //   'http://127.0.0.1:3000/salesorder',
-        //   getOutputFormatted,
-        //   { headers: { 'Content-Type': 'application/json' } }
-        // );
+        // POST REQUEST TO RMQ
 
-        // const RABBIT_URL = 'amqp://ezzah:afm01@127.0.0.1:5672/';
-        const RABBIT_URL = 'amqp://localhost';
+        const RABBIT_URL = 'amqp://'+config.RABBITMQ_USER+':'+config.RABBITMQ_PASS+'@'+config.RABBITMQ_HOST+':'+config.RABBITMQ_PORT+'/'+config.RABBITMQ_VHOST;
+        // const RABBIT_URL = 'amqp://localhost';
         const connection = await amqp.connect(RABBIT_URL);
         const channel = await connection.createChannel();
-
+        await channel.assertQueue('sales_order', { durable: true });
+        
         // Create a temporary exclusive queue for replies
         const { queue: replyQueue } = await channel.assertQueue('', { exclusive: true });
         const correlationId = uuidv4();
@@ -310,7 +311,7 @@ async function processReq(input){
             channel.sendToQueue(
               'sales_order', // queue name
               Buffer.from(JSON.stringify(getOutputFormatted)),
-              { correlationId, replyTo: replyQueue,expiration: '39000' }
+              { correlationId, replyTo: replyQueue,expiration: '38000' }
             );
 
             // START 38-SECOND TIMEOUT ONLY AFTER SEND SUCCESS
@@ -379,7 +380,7 @@ async function processReq(input){
               await cleanup();
               resolve(failResponse);
 
-            }, 39000); // 39 seconds
+            }, 38000); // 38 seconds
 
           } catch (err) {
             console.error("Failed to send to queue:", err.message);
@@ -537,8 +538,6 @@ async function dynamicInsert(pool, tableName, data) {
   return res.rows[0]; // return full inserted row
 }
 
-async function rpcClient(n) {
-    
-}
+
 
 module.exports = { processReq };

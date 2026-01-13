@@ -1,4 +1,9 @@
 const pool = require('../db');
+const path = require('path');
+const loadConfig = require('../config/envLoader'); 
+
+const configPath = path.resolve(__dirname, '../config/app.conf');
+const config = loadConfig(configPath);
 const axios = require('axios');
 const logger = require('../logger'); 
 const { v4: uuidv4 } = require('uuid');
@@ -21,7 +26,6 @@ function getCurrentDateTime() {
 async function getInventory(input){
   const appid = 60163222354;
   const servicetype = 'QUERY_SIMPLE_LIST_INVENTORY_V2';
-  const RPC_TIMEOUT_MS = 38000; // 38 seconds
 
   //insert raw data into db
   const query = `
@@ -98,17 +102,13 @@ async function getInventory(input){
         logger.downstream.info(`Request to Upstream: ${JSON.stringify(getOutputFormatted, null, 2)}`);
 
       try{
-        // POST REQUEST TO BEST ERP
-        // const response = await axios.post(
-        //   'http://127.0.0.1:3000/checkinventory', // replace with ERP URL
-        //   getOutputFormatted,
-        //   { headers: { 'Content-Type': 'application/json' } }
-        // );
+        // POST REQUEST TO RMQ
 
-        // const RABBIT_URL = 'amqp://ezzah:afm01@127.0.0.1:5672/';
-        const RABBIT_URL = 'amqp://localhost';
+        const RABBIT_URL = 'amqp://'+config.RABBITMQ_USER+':'+config.RABBITMQ_PASS+'@'+config.RABBITMQ_HOST+':'+config.RABBITMQ_PORT+'/'+config.RABBITMQ_VHOST;
+        // const RABBIT_URL = 'amqp://localhost';
         const connection = await amqp.connect(RABBIT_URL);
         const channel = await connection.createChannel();
+        await channel.assertQueue('check_inventory', { durable: true });
 
         const { queue: replyQueue } = await channel.assertQueue('', { exclusive: true });
         const correlationId = uuidv4();
@@ -277,7 +277,7 @@ async function getInventory(input){
             channel.sendToQueue(
               'check_inventory', 
               Buffer.from(JSON.stringify(getOutputFormatted)),
-              { correlationId, replyTo: replyQueue,expiration: '39000' }
+              { correlationId, replyTo: replyQueue,expiration: '38000' }
             );
 
             timeoutHandle = setTimeout(async () => {
@@ -345,7 +345,7 @@ async function getInventory(input){
               await cleanup();
               resolve(failResponse);
 
-            }, 39000); // 39 seconds
+            }, 38000); // 38 seconds
 
           } catch (err) {
             console.error("Failed to send to queue:", err.message);
