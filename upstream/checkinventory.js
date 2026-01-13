@@ -1,4 +1,10 @@
 const pool = require('../db');
+const path = require('path');
+const loadConfig = require('../config/envLoader');
+
+const configPath = path.resolve(__dirname, '../config/app.conf');
+const config = loadConfig(configPath);
+
 const crypto = require("crypto");
 const axios = require('axios');
 const FormData = require('form-data');
@@ -149,7 +155,7 @@ async function checkOrderStatus(input) {
 
         // POST REQUEST TO BEST ERP
         const response = await axios.post(
-        'https://www.qianyierp.com/api/v1/inventory', // replace with ERP URL
+        config.ERP_INVENTORY_URL, // replace with ERP URL
         // 'http://localhost:3001/api/v1/salesOrder',
 
         form,

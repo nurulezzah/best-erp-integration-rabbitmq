@@ -1,4 +1,9 @@
 const pool = require('../db');
+const path = require('path');
+const loadConfig = require('../config/envLoader');
+
+const configPath = path.resolve(__dirname, '../config/app.conf');
+const config = loadConfig(configPath);
 const axios = require('axios');
 const logger = require('../logger'); 
 const { v4: uuidv4 } = require('uuid');
@@ -96,17 +101,13 @@ async function checkOrderStatus(input){
 
 
       try{
-        // POST REQUEST TO BEST ERP
-        // const response = await axios.post(
-        //   'http://127.0.0.1:3000/checkorder',
-        //   dsReq,
-        //   { headers: { 'Content-Type': 'application/json' } }
-        // );
+        // POST REQUEST TO RMQ
 
-        // const RABBIT_URL = 'amqp://ezzah:afm01@127.0.0.1:5672/';
-        const RABBIT_URL = 'amqp://localhost';
+        const RABBIT_URL = 'amqp://'+config.RABBITMQ_USER+':'+config.RABBITMQ_PASS+'@'+config.RABBITMQ_HOST+':'+config.RABBITMQ_PORT+'/'+config.RABBITMQ_VHOST;
+        // const RABBIT_URL = 'amqp://localhost';
         const connection = await amqp.connect(RABBIT_URL);
         const channel = await connection.createChannel();
+        await channel.assertQueue('check_order', { durable: true });
 
         // Create a temporary exclusive queue for replies
         const { queue: replyQueue } = await channel.assertQueue('', { exclusive: true });
@@ -275,7 +276,7 @@ async function checkOrderStatus(input){
             channel.sendToQueue(
               'check_order', 
               Buffer.from(JSON.stringify(dsReq)),
-              { correlationId, replyTo: replyQueue,expiration: '39000' }
+              { correlationId, replyTo: replyQueue,expiration: '38000' }
             );
 
             timeoutHandle = setTimeout(async () => {
@@ -342,7 +343,7 @@ async function checkOrderStatus(input){
               await cleanup();
               resolve(failResponse);
 
-            }, 39000); // 39 seconds
+            }, 38000); // 38 seconds
 
           } catch (err) {
             console.error("Failed to send to queue:", err.message);

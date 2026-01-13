@@ -1,18 +1,22 @@
 const amqp = require('amqplib');
+const path = require('path');
+const loadConfig = require('../config/envLoader');
+
+const configPath = path.resolve(__dirname, '../config/app.conf');
+const config = loadConfig(configPath);
+
 const axios = require('axios');
 
-const RABBIT_URL = 'amqp://localhost';
-// const REQUEST_QUEUE = 'sales_order';
-// const ERP_ENDPOINT = 'http://127.0.0.1:3000/salesorder';
+const RABBIT_URL = 'amqp://'+config.RABBITMQ_USER+':'+config.RABBITMQ_PASS+'@'+config.RABBITMQ_HOST+':'+config.RABBITMQ_PORT+'/'+config.RABBITMQ_VHOST;
 const QUEUE_HANDLERS = {
   sales_order: {
-    endpoint: 'http://127.0.0.1:3000/salesorder'
+    endpoint: config.ERP_SO_URL+config.ERP_SO_ENDPOINT
   },
   check_inventory: {
-    endpoint: 'http://127.0.0.1:3000/checkinventory'
+    endpoint: config.ERP_INVENTORY_URL+config.ERP_INVENTORY_ENDPOINT
   },
   check_order: {
-    endpoint: 'http://127.0.0.1:3000/checkorder'
+    endpoint: config.ERP_CO_URL+config.ERP_CO_ENDPOINT
   }
 };
 
@@ -55,7 +59,7 @@ async function consumeQueue(channel, queueName, handler) {
     channel.ack(msg);
   });
 
-  console.log(`🟢 Listening on ${queueName}`);
+  console.log(`Listening on ${queueName}`);
 }
 
 async function start() {
@@ -73,57 +77,5 @@ start().catch(console.error);
 
 
 
-// async function start() {
-//   const connection = await amqp.connect(RABBIT_URL);
-//   const channel = await connection.createChannel();
-
-//   await channel.assertQueue(REQUEST_QUEUE, {
-//     durable: false
-//   });
-
-//   // Important: process one message at a time
-//   channel.prefetch(1);
-
-//   console.log('🟢 Waiting for RPC requests...');
-
-//   channel.consume(REQUEST_QUEUE, async (msg) => {
-//     if (!msg) return;
-
-//     const payload = JSON.parse(msg.content.toString());
-//     const correlationId = msg.properties.correlationId;
-//     const replyTo = msg.properties.replyTo;
-
-//     console.log('📩 Received order:', payload);
-
-//     let response;
-
-//     try {
-//       // 🔹 Call ERP
-//       const erpResponse = await axios.post(ERP_ENDPOINT, payload);
-
-//       response = {
-//         success: true,
-//         data: erpResponse.data
-//       };
-//     } catch (err) {
-//       response = {
-//         success: false,
-//         error: err.response?.data || err.message
-//       };
-//     }
-
-//     // 🔹 Send response back to RPC client
-//     channel.sendToQueue(
-//       replyTo,
-//       Buffer.from(JSON.stringify(response)),
-//       {
-//         correlationId
-//       }
-//     );
-
-//     // 🔹 Acknowledge message
-//     channel.ack(msg);
-//   });
-// }
 
 

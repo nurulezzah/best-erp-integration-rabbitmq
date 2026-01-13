@@ -7,3 +7,4 @@ logs/
 /certs/
 
 fake-erp.js
+# /config/app.conf
