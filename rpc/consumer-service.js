@@ -7,23 +7,24 @@ const config = loadConfig(configPath);
 
 const axios = require('axios');
 
-const RABBIT_URL = 'amqp://'+config.RABBITMQ_USER+':'+config.RABBITMQ_PASS+'@'+config.RABBITMQ_HOST+':'+config.RABBITMQ_PORT+'/'+config.RABBITMQ_VHOST;
+const RABBIT_URL = config.RABBITMQ_URL;
+// const RABBIT_URL = `amqp://localhost:5672`;
 const QUEUE_HANDLERS = {
   sales_order: {
-    endpoint: config.ERP_SO_URL+config.ERP_SO_ENDPOINT
+    endpoint: config.UPSTREAM_URL+config.ERP_SO_ENDPOINT
   },
   check_inventory: {
-    endpoint: config.ERP_INVENTORY_URL+config.ERP_INVENTORY_ENDPOINT
+    endpoint: config.UPSTREAM_URL+config.ERP_INVENTORY_ENDPOINT
   },
   check_order: {
-    endpoint: config.ERP_CO_URL+config.ERP_CO_ENDPOINT
+    endpoint: config.UPSTREAM_URL+config.ERP_CO_ENDPOINT
   }
 };
 
 
 
 async function consumeQueue(channel, queueName, handler) {
-  await channel.assertQueue(queueName, { durable: false });
+  await channel.assertQueue(queueName, { durable: true });
 
   channel.consume(queueName, async (msg) => {
     if (!msg) return;
@@ -42,12 +43,15 @@ async function consumeQueue(channel, queueName, handler) {
     try {
       const erpResponse = await axios.post(handler.endpoint, payload);
       response = { success: true, data: erpResponse.data };
-
+      console.log(`Processed ${queueName}:`, response);
+      
     } catch (err) {
       response = {
         success: false,
         error: err.response?.data || err.message
       };
+
+      console.log(`Error processing ${queueName}:`, response);
     }
 
     channel.sendToQueue(
@@ -63,6 +67,7 @@ async function consumeQueue(channel, queueName, handler) {
 }
 
 async function start() {
+  console.log('Connecting to RabbitMQ at', RABBIT_URL);
   const connection = await amqp.connect(RABBIT_URL);
   const channel = await connection.createChannel();
 
