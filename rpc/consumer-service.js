@@ -28,7 +28,6 @@ async function consumeQueue(channel, queueName, handler) {
 
   channel.consume(queueName, async (msg) => {
     if (!msg) return;
-    console.log("queuename=", queueName);
     let payload;
     try {
       payload = JSON.parse(msg.content.toString());
@@ -43,15 +42,12 @@ async function consumeQueue(channel, queueName, handler) {
     try {
       const erpResponse = await axios.post(handler.endpoint, payload);
       response = { success: true, data: erpResponse.data };
-      console.log(`Processed ${queueName}:`, response);
       
     } catch (err) {
       response = {
         success: false,
         error: err.response?.data || err.message
       };
-
-      console.log(`Error processing ${queueName}:`, response);
     }
 
     channel.sendToQueue(
