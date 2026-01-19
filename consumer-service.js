@@ -2,7 +2,7 @@ const amqp = require('amqplib');
 const path = require('path');
 const loadConfig = require('./config/envLoader');
 
-const configPath = path.resolve(__dirname, '../config/app.conf');
+const configPath = path.resolve(__dirname, './config/app.conf');
 const config = loadConfig(configPath);
 
 const axios = require('axios');
