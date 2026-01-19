@@ -1,6 +1,6 @@
 const amqp = require('amqplib');
 const path = require('path');
-const loadConfig = require('../config/envLoader');
+const loadConfig = require('./config/envLoader');
 
 const configPath = path.resolve(__dirname, '../config/app.conf');
 const config = loadConfig(configPath);
