@@ -294,7 +294,7 @@ async function reqToERP(data, uuid) {
   };
 
   logger.upstream.info(`Request to BEST ERP: ${JSON.stringify(safeLog, null, 2)}`);
-
+  console.log(`Request to BEST ERP: ${JSON.stringify(safeLog, null, 2)}`);
 
 
   try {
@@ -310,7 +310,8 @@ async function reqToERP(data, uuid) {
     );
     
     logger.upstream.info(`Response from BEST ERP: ${JSON.stringify(response.data, null, 2)}`);
-
+    console.log(`Response from BEST ERP: ${JSON.stringify(response.data, null, 2)}`);
+    
     const baseRes = `
        UPDATE so_base_req
        SET state = $1,
@@ -571,7 +572,7 @@ async function reqToERP(data, uuid) {
 
       const formatted_res = {
         state: "failure",
-        responsecode: "1", 
+        responsecode: "21", 
         response_date: getCurrentDateTime()
       };
 

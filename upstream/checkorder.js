@@ -141,7 +141,9 @@ async function checkStatus(input){
         };
 
         logger.upstream.info(`Request to BEST ERP: ${JSON.stringify(safeLog, null, 2)}`);
+        console.log(`Request to BEST ERP: ${JSON.stringify(safeLog, null, 2)}`);
 
+        
         // POST REQUEST TO BEST ERP
         const response = await axios.post(
         config.ERP_CO_URL, // replace with ERP URL
@@ -152,7 +154,7 @@ async function checkStatus(input){
 
 
         logger.upstream.info(`Response from BEST ERP: ${JSON.stringify(response.data, null, 2)}`);
-        // return response.data
+        console.log(`Response from BEST ERP: ${JSON.stringify(response.data, null, 2)}`);
 
         if (response.data.state == "success") {
             let baseRes = `
@@ -462,7 +464,7 @@ async function checkStatus(input){
 
             const formatted_res = {
                 state: "failure",
-                responsecode: "1", 
+                responsecode: "21", 
                 response_date: getCurrentDateTime()
             };
 

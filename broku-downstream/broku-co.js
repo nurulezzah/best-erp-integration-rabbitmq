@@ -26,6 +26,7 @@ function getCurrentDateTime() {
 
 
 async function checkOrderStatus(input){
+  console.log('Downstream input:', input);
   const appid = 60163222354;
   const servicetype = 'QUERY_SKU_SOURCE_ORDER';
 
@@ -142,9 +143,9 @@ async function checkOrderStatus(input){
                     const response = JSON.parse(raw);
                     
                     logger.downstream.info(
-                      `Response from BEST ERP: ${JSON.stringify(response.data, null, 2)}`
+                      `Response to client: ${JSON.stringify(response.data, null, 2)}`
                     );
-
+                    console.log(`Downstream output: ${JSON.stringify(response.data, null, 2)}`);
                     const rawRes = `
                       UPDATE broku_co_downstream_output_raw
                       SET rawresponse = $1,
@@ -281,7 +282,7 @@ async function checkOrderStatus(input){
 
             timeoutHandle = setTimeout(async () => {
               logger.downstream.error('RabbitMQ RPC timeout after 38 seconds');
-
+              console.log('RabbitMQ RPC timeout after 38 seconds');
               const failResponse = {
                 state: 'failure',
                 responsecode: 1,
@@ -350,7 +351,7 @@ async function checkOrderStatus(input){
 
             const failResponse = {
               state: 'failure',
-              responsecode: 1,
+              responsecode: 21,
               responsedate: getCurrentDateTime()
             };
 
@@ -362,7 +363,7 @@ async function checkOrderStatus(input){
             `;
             await pool.query(rawRes, [
               failResponse,
-              getCurrentDateTime(),
+              failResponse.responsedate,
               outputRawUuid
             ]);
 
@@ -374,9 +375,9 @@ async function checkOrderStatus(input){
               WHERE uuid = $4;
             `;
             await pool.query(baseRes, [
-              'failure',
-              1,
-              getCurrentDateTime(),
+              failResponse.state,
+              failResponse.responsecode,
+              failResponse.responsedate,
               outputFormattedUuid
             ]);
 
@@ -388,9 +389,9 @@ async function checkOrderStatus(input){
               WHERE uuid = $4;
             `;
             await pool.query(baseInputRes, [
-              'failure',
-              1,
-              getCurrentDateTime(),
+              failResponse.state,
+              failResponse.responsecode,
+              failResponse.responsedate,
               formattedUuid
             ]);
 
@@ -402,7 +403,7 @@ async function checkOrderStatus(input){
             `;
             await pool.query(rawInputRes, [
               failResponse,
-              getCurrentDateTime(),
+              failResponse.responsedate,
               rawUuid
             ]);
 

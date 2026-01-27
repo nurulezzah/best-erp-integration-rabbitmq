@@ -9,6 +9,7 @@ const axios = require('axios');
 const logger = require('../logger'); 
 const { v4: uuidv4 } = require('uuid');
 const amqp = require('amqplib');
+const { fail } = require('assert');
 
 function getCurrentDateTime() {
   const now = new Date();
@@ -25,6 +26,7 @@ function getCurrentDateTime() {
 }
 
 async function processReq(input){
+  console.log('Downstream input: ',input);
   const appid = 60163222354;
   const servicetype = 'CREATE_SALES_ORDER';
 
@@ -173,8 +175,9 @@ async function processReq(input){
                   const response = JSON.parse(raw);
                   
                   logger.downstream.info(
-                    `Response from BEST ERP: ${JSON.stringify(response.data, null, 2)}`
+                    `Response to client: ${JSON.stringify(response.data, null, 2)}`
                   );
+                  console.log('Downstream output: ',JSON.stringify(response.data, null, 2));
 
                   // ---- DB Updates ----
 
@@ -234,6 +237,7 @@ async function processReq(input){
 
                 } catch (err) {
                   console.error("Error processing consumer response:", err.message);
+                  console.log("Error processing consumer response:", err.message);
 
                   const failResponse = {
                     state: 'failure',
@@ -317,6 +321,7 @@ async function processReq(input){
             // START 38-SECOND TIMEOUT ONLY AFTER SEND SUCCESS
             timeoutHandle = setTimeout(async () => {
               logger.downstream.error('RabbitMQ RPC timeout after 38 seconds');
+              console.log('RabbitMQ RPC timeout after 38 seconds');
 
               const failResponse = {
                 state: 'failure',
@@ -387,7 +392,7 @@ async function processReq(input){
 
             const failResponse = {
               state: 'failure',
-              responsecode: 1,
+              responsecode: 21,
               responsedate: getCurrentDateTime()
             };
 
@@ -400,7 +405,7 @@ async function processReq(input){
             `;
             await pool.query(rawRes, [
               failResponse,
-              getCurrentDateTime(),
+              failResponse.responsedate,
               outputRaw.rows[0].uuid
             ]);
 
@@ -412,9 +417,9 @@ async function processReq(input){
               WHERE uuid = $4;
             `;
             await pool.query(baseRes, [
-              'failure',
-              1,
-              getCurrentDateTime(),
+              failResponse.state,
+              failResponse.responsecode,
+              failResponse.responsedate,
               outputFormattedUuid
             ]);
 
@@ -426,9 +431,9 @@ async function processReq(input){
               WHERE uuid = $4;
             `;
             await pool.query(baseInputRes, [
-              'failure',
-              1,
-              getCurrentDateTime(),
+              failResponse.state,
+              failResponse.responsecode,
+              failResponse.responsedate,
               formattedUuid
             ]);
 
@@ -440,7 +445,7 @@ async function processReq(input){
             `;
             await pool.query(rawInputRes, [
               failResponse,
-              getCurrentDateTime(),
+              failResponse.responsedate,
               rawUuid
             ]);
 
