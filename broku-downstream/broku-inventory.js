@@ -24,6 +24,7 @@ function getCurrentDateTime() {
 }
 
 async function getInventory(input){
+  console.log('Downstream input: ',input);
   const appid = 60163222354;
   const servicetype = 'QUERY_SIMPLE_LIST_INVENTORY_V2';
 
@@ -143,9 +144,9 @@ async function getInventory(input){
                     const response = JSON.parse(raw);
                     
                     logger.downstream.info(
-                      `Response from BEST ERP: ${JSON.stringify(response.data, null, 2)}`
+                      `Response to client: ${JSON.stringify(response.data, null, 2)}`
                     );
-
+                    console.log(`Downstream output: ${JSON.stringify(response.data, null, 2)}`);
                     const rawRes = `
                       UPDATE broku_inv_downstream_output_raw
                       SET rawresponse = $1,
@@ -282,6 +283,7 @@ async function getInventory(input){
 
             timeoutHandle = setTimeout(async () => {
               logger.downstream.error('RabbitMQ RPC timeout after 38 seconds');
+              console.log('RabbitMQ RPC timeout after 38 seconds');
 
               const failResponse = {
                 state: 'failure',
@@ -352,7 +354,7 @@ async function getInventory(input){
 
             const failResponse = {
               state: 'failure',
-              responsecode: 1,
+              responsecode: 21,
               responsedate: getCurrentDateTime()
             };
 
@@ -364,7 +366,7 @@ async function getInventory(input){
             `;
             await pool.query(rawRes, [
               failResponse,
-              getCurrentDateTime(),
+              failResponse.responsedate,
               outputRaw.rows[0].uuid
             ]);
 
@@ -376,9 +378,9 @@ async function getInventory(input){
               WHERE uuid = $4;
             `;
             await pool.query(baseRes, [
-              'failure',
-              1,
-              getCurrentDateTime(),
+              failResponse.state,
+              failResponse.responsecode,
+              failResponse.responsedate,
               outputFormattedUuid
             ]);
 
@@ -390,9 +392,9 @@ async function getInventory(input){
               WHERE uuid = $4;
             `;
             await pool.query(baseInputRes, [
-              'failure',
-              1,
-              getCurrentDateTime(),
+              failResponse.state,
+              failResponse.responsecode,
+              failResponse.responsedate,
               formattedUuid
             ]);
 
@@ -404,7 +406,7 @@ async function getInventory(input){
             `;
             await pool.query(rawInputRes, [
               failResponse,
-              getCurrentDateTime(),
+              failResponse.responsedate,
               rawUuid
             ]);
 

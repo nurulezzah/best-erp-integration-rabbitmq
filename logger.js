@@ -10,6 +10,7 @@ const baseLogDir = '/var/log/best-erp-integration';
 const logDirs = {
   upstream: path.join(baseLogDir, 'upstream'),
   downstream: path.join(baseLogDir, 'downstream'),
+  consumer: path.join(baseLogDir, 'consumer')
 };
 
 // Ensure all directories exist
@@ -49,6 +50,7 @@ function createLoggerWithErrorFile(name, dirPath) {
 const logger = {
   upstream: createLoggerWithErrorFile('upstream', logDirs.upstream),
   downstream: createLoggerWithErrorFile('downstream', logDirs.downstream),
+  consumer: createLoggerWithErrorFile('consumer', logDirs.consumer)
 };
 
 module.exports = logger;
