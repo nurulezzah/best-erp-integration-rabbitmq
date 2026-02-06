@@ -8,7 +8,6 @@ const configPath = path.resolve(__dirname, './config/app.conf');
 const config = loadConfig(configPath);
 
 const RABBIT_URL = config.RABBITMQ_URL;
-// const RABBIT_URL = `amqp://localhost:5672`;
 
 const QUEUE_HANDLERS = {
   sales_order: {
@@ -25,6 +24,45 @@ const QUEUE_HANDLERS = {
 let retryDelay = 2000;
 const MAX_DELAY = 30000;
 
+// ------------------ Token Bucket ------------------
+class TokenBucket {
+  constructor({ capacity, refillRate }) {
+    this.capacity = capacity;
+    this.tokens = capacity;
+    this.refillRate = refillRate; // tokens per second
+    this.lastRefill = Date.now();
+  }
+
+  refill() {
+    const now = Date.now();
+    const elapsedSeconds = (now - this.lastRefill) / 1000;
+    const tokensToAdd = elapsedSeconds * this.refillRate;
+
+    if (tokensToAdd > 0) {
+      this.tokens = Math.min(this.capacity, this.tokens + tokensToAdd);
+      this.lastRefill = now;
+    }
+  }
+
+  consume(count = 1) {
+    this.refill();
+    if (this.tokens >= count) {
+      this.tokens -= count;
+      return true;
+    }
+    return false;
+  }
+}
+
+// ------------------ Create buckets ------------------
+
+// sales_order has its own bucket
+const salesOrderBucket = new TokenBucket({ capacity: 10, refillRate: 5 });
+
+// check_inventory & check_order share one bucket
+const sharedInventoryOrderBucket = new TokenBucket({ capacity: 1, refillRate: 1 });
+
+// ------------------ Queue Consumer ------------------
 async function consumeQueue(channel, queueName, handler) {
   await channel.assertQueue(queueName, { durable: true });
 
@@ -41,29 +79,55 @@ async function consumeQueue(channel, queueName, handler) {
 
     const { correlationId, replyTo } = msg.properties;
 
-    let response;
     try {
+      // ------------------ Token selection ------------------
+      let hasToken = false;
+
+      if (queueName === 'sales_order') {
+        hasToken = salesOrderBucket.consume(1);
+        if (hasToken) {
+          console.log(`[${queueName}] Consumed 1 token. Tokens left: ${salesOrderBucket.tokens.toFixed(2)}`);
+        }
+      } else if (queueName === 'check_inventory' || queueName === 'check_order') {
+        hasToken = sharedInventoryOrderBucket.consume(1);
+        if (hasToken) {
+          console.log(`[SharedBucket:${queueName}] Consumed 1 token. Tokens left: ${sharedInventoryOrderBucket.tokens.toFixed(2)}`);
+        }
+      }
+
+      // ------------------ No token available → respond failure ------------------
+      if (!hasToken) {
+        const failResponse = {
+          state: "failure",
+          responseMsg: "high system load",
+          responseCode: 20
+        };
+        channel.sendToQueue(replyTo, Buffer.from(JSON.stringify(failResponse)), { correlationId });
+        console.log(`[${queueName}] No token available → responded with high system load`);
+        channel.ack(msg);
+        return;
+      }
+
+      // ------------------ Normal processing ------------------
       const erpResponse = await axios.post(handler.endpoint, payload);
-      response = { success: true, data: erpResponse.data };
+      const response = { success: true, data: erpResponse.data };
+      channel.sendToQueue(replyTo, Buffer.from(JSON.stringify(response)), { correlationId });
+      channel.ack(msg);
+
     } catch (err) {
-      response = {
+      const response = {
         success: false,
         error: err.response?.data || err.message
       };
+      channel.sendToQueue(replyTo, Buffer.from(JSON.stringify(response)), { correlationId });
+      channel.ack(msg);
     }
-
-    channel.sendToQueue(
-      replyTo,
-      Buffer.from(JSON.stringify(response)),
-      { correlationId }
-    );
-
-    channel.ack(msg);
   });
 
   logger.consumer.info(`Listening on ${queueName}`);
 }
 
+// ------------------ Consumer Starter ------------------
 async function startConsumer() {
   while (true) {
     try {
@@ -81,7 +145,6 @@ async function startConsumer() {
       connection.on('close', () => {
         logger.consumer.warn('RabbitMQ connection closed. Reconnecting...');
         console.log('RabbitMQ connection closed. Reconnecting...');
-
       });
 
       const channel = await connection.createChannel();
@@ -92,10 +155,8 @@ async function startConsumer() {
       }
 
       logger.consumer.info('RabbitMQ consumer connected.');
-
       retryDelay = 2000; // reset after success
 
-      // Wait until connection closes
       await new Promise(resolve => connection.once('close', resolve));
 
     } catch (err) {
@@ -116,5 +177,4 @@ function sleep(ms) {
 startConsumer().catch(err => {
   logger.consumer.error('Fatal consumer error:', err);
   console.log('Fatal consumer error:', err);
-
 });
