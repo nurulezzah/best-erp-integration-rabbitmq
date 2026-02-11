@@ -60,7 +60,7 @@ class TokenBucket {
 const salesOrderBucket = new TokenBucket({ capacity: 10, refillRate: 5 });
 
 // check_inventory & check_order share one bucket
-const sharedInventoryOrderBucket = new TokenBucket({ capacity: 1, refillRate: 1 });
+const sharedInventoryOrderBucket = new TokenBucket({ capacity: 20, refillRate: 10 });
 
 // ------------------ Queue Consumer ------------------
 async function consumeQueue(channel, queueName, handler) {
@@ -104,6 +104,7 @@ async function consumeQueue(channel, queueName, handler) {
         };
         channel.sendToQueue(replyTo, Buffer.from(JSON.stringify(failResponse)), { correlationId });
         console.log(`[${queueName}] No token available → responded with high system load`);
+        logger.consumer.info(`[${queueName}] No token available → responded with high system load`);
         channel.ack(msg);
         return;
       }

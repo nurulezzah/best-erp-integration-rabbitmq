@@ -457,6 +457,44 @@ async function processReq(input){
 
       }catch (err) {
         logger.downstream.error('Error at post data to upstream:', err);
+        const responseFail ={
+            "state" : "failure",
+            "responsecode" : 1,
+            "response date" : getCurrentDateTime()
+          };
+
+          const formattedInputRes = `
+            UPDATE broku_so_downstream_input_formatted
+            SET responsecode = $1,
+                response_date = $2,
+                state = $3
+            WHERE uuid = $4;
+          `;
+
+            let formattedInputResVal = [
+            responseFail.responsecode,
+            getCurrentDateTime(),
+            responseFail.state,
+            formattedUuid
+          ];
+
+          await pool.query(formattedInputRes, formattedInputResVal);
+          
+          const rawInputRes = `
+            UPDATE broku_so_downstream_input_raw
+            SET rawresponse = $1,
+                response_date = $2
+            WHERE uuid = $3;
+          `;
+
+          let rawInputResVal = [
+            responseFail,
+            getCurrentDateTime(),
+            rawUuid
+          ];
+
+          await pool.query(rawInputRes, rawInputResVal);
+          return await responseFail;
       } 
 
   } catch (err) {
