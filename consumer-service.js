@@ -86,11 +86,13 @@ async function consumeQueue(channel, queueName, handler) {
       if (queueName === 'sales_order') {
         hasToken = salesOrderBucket.consume(1);
         if (hasToken) {
+          logger.consumer.info(`[${queueName}] Consumed 1 token. Tokens left: ${salesOrderBucket.tokens.toFixed(2)}`);
           console.log(`[${queueName}] Consumed 1 token. Tokens left: ${salesOrderBucket.tokens.toFixed(2)}`);
         }
       } else if (queueName === 'check_inventory' || queueName === 'check_order') {
         hasToken = sharedInventoryOrderBucket.consume(1);
         if (hasToken) {
+          logger.consumer.info(`[SharedBucket:${queueName}] Consumed 1 token. Tokens left: ${sharedInventoryOrderBucket.tokens.toFixed(2)}`);
           console.log(`[SharedBucket:${queueName}] Consumed 1 token. Tokens left: ${sharedInventoryOrderBucket.tokens.toFixed(2)}`);
         }
       }
