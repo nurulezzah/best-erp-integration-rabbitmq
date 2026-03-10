@@ -108,9 +108,10 @@ function lastSyncTime(mytTime) {
 
 async function getLastSyncTimeFromDB() {
   const res = await pool.query(`
-    SELECT last_sync_time 
-    FROM easystore_so_downstream_input_raw 
-    ORDER BY last_sync_time DESC 
+    SELECT last_sync_time
+    FROM easystore_so_downstream_input_raw
+    WHERE last_sync_time IS NOT NULL
+    ORDER BY last_sync_time DESC
     LIMIT 1;
   `);
 
@@ -137,6 +138,8 @@ async function fetchEasyStoreOrders() {
     const updatedAtMin = lastSync;                  
     const updatedAtMax = lastSyncTime(now);         
 
+    logger.downstream.info(`Fetching orders updated between ${updatedAtMin} and ${updatedAtMax}`);
+    console.log(`Fetching orders updated between ${updatedAtMin} and ${updatedAtMax}`);
     const response = await axios.get(config.EASYSTORE_URL_ORDERLIST, {
       headers: {
         'EasyStore-Access-Token': config.EASYSTORE_TOKEN
@@ -172,8 +175,7 @@ async function processOrders(data, rawUuid) {
 
   const orders = data.orders || [];
   if (!orders.length) return;
-
-  const searchTerm = 'easystore';
+  const searchTerm = config.EASYSTORE_CLIENT;
   const clientRes = await pool.query(
     `SELECT * FROM client_data WHERE client ILIKE $1`,
     [searchTerm]
