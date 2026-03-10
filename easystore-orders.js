@@ -27,7 +27,7 @@ function convertToMYT(utcTime) {
   const date = new Date(utcTime);
 
   const options = {
-    timeZone: 'Asia/Kuala_Lumpur', // Malaysia
+    timeZone: 'Asia/Kuala_Lumpur', 
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -90,30 +90,89 @@ async function updateAllTables(formattedUuid, rawUuid, responseObj) {
   ]);
 }
 
+function lastSyncTime(mytTime) {
+  if (!mytTime) return null;
+
+  const isoLike = mytTime.replace(' ', 'T'); 
+  const date = new Date(`${isoLike}+08:00`); 
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+
+  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}+08:00`;
+}
+
+async function getLastSyncTimeFromDB() {
+  const res = await pool.query(`
+    SELECT last_sync_time 
+    FROM easystore_so_downstream_input_raw 
+    ORDER BY last_sync_time DESC 
+    LIMIT 1;
+  `);
+
+  let lastSync = res.rows[0]?.last_sync_time;
+
+  if (!lastSync) {
+     // Table is empty → fallback to TODAY at 12:00:00 MYT
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const fallback = `${year}-${month}-${day} 12:00:00`; // today at 12:00
+    lastSync = lastSyncTime(fallback); // converts to "YYYY-MM-DDTHH:mm:ss+08:00"
+  }
+
+  return lastSync;
+}
 
 async function fetchEasyStoreOrders() {
   try {
+    const lastSync = await getLastSyncTimeFromDB(); 
+    const now = getCurrentDateTime();               
+
+    const updatedAtMin = lastSync;                  
+    const updatedAtMax = lastSyncTime(now);         
 
     const response = await axios.get(config.EASYSTORE_URL_ORDERLIST, {
       headers: {
         'EasyStore-Access-Token': config.EASYSTORE_TOKEN
       },
+      params: {
+        financial_status: 'paid',
+        updated_at_min: updatedAtMin,
+        updated_at_max: updatedAtMax,
+        fulfillment_status: 'unfulfilled'
+      },
       timeout: 15000
     });
 
-    return response.data;
+    logger.downstream.info('Fetched orders from EasyStore', response.data.orders);
+    console.log('Fetched orders from EasyStore', response.data.orders);
+
+    const rawInsert = await pool.query(`
+      INSERT INTO easystore_so_downstream_input_raw (rawdata, last_sync_time)
+      VALUES ($1, $2)
+      RETURNING *
+    `, [JSON.stringify(response.data), updatedAtMax]);
+
+    const rawUuid = rawInsert.rows[0].uuid;
+    return { data: response.data, rawUuid };
+
   } catch (error) {
     console.error('[EasyStore] API Error:', error.response?.data || error.message);
     throw error;
   }
 }
 
-async function processOrders(data) {
+async function processOrders(data, rawUuid) {
 
   const orders = data.orders || [];
   if (!orders.length) return;
 
-  // 🔹 Get shop once (not inside loop)
   const searchTerm = 'easystore';
   const clientRes = await pool.query(
     `SELECT * FROM client_data WHERE client ILIKE $1`,
@@ -126,26 +185,12 @@ async function processOrders(data) {
 
   const shop = clientRes.rows[0].shop;
 
-  // 🔹 Insert RAW once
-  const rawInsert = await pool.query(
-    `INSERT INTO easystore_so_downstream_input_raw (rawdata)
-     VALUES ($1)
-     RETURNING uuid`,
-    [data]
-  );
-
-  const rawUuid = rawInsert.rows[0].uuid;
-
-  // 🔥 Collect all RMQ promises here
   const rmqTasks = [];
 
   for (const order of orders) {
 
     let paid_at= convertToMYT(order.paid_at);
     let order_created = convertToMYT(order.created_at);
-    if (order.fulfillment_status !== 'unfulfilled' || !paid_at) {
-      continue;
-    }
 
     try {
       const formatted = await dynamicInsert(
@@ -264,7 +309,6 @@ async function processOrders(data) {
       );
 
       console.log('Prepared SMF for RMQ:', smf);
-      // 🔥 DO NOT await here → push to global task list
       rmqTasks.push(
         sendToRMQ(formattedUuid, rawUuid,smf)
       );
@@ -274,9 +318,6 @@ async function processOrders(data) {
     }
   }
 
-  // ===============================
-  // 🔥 PARALLEL RMQ SEND HERE
-  // ===============================
   if (rmqTasks.length) {
     const results = await Promise.allSettled(rmqTasks);
     const valuesOnly = results
@@ -284,7 +325,6 @@ async function processOrders(data) {
       .map(r => r.value);
   }
 }
-
 
 // Main function to send data to RMQ and wait for response
 async function sendToRMQ(formattedUuid, rawUuid, payload) {
@@ -313,7 +353,7 @@ async function sendToRMQ(formattedUuid, rawUuid, payload) {
 
   return new Promise(async (resolve) => {
     try {
-      // Consumer for reply
+
       const consumeResult = await channel.consume(
         replyQueue,
         async (msg) => {
@@ -330,14 +370,12 @@ async function sendToRMQ(formattedUuid, rawUuid, payload) {
             console.log('Downstream output: ', response);
             logger.downstream.info(`Response to client: ${JSON.stringify(response)}`);
 
-            // Determine success/failure
             if (response.success === true || response.success === 'true') {
               finalResponse = { state: 'success', responsedate: getCurrentDateTime() };
             } else {
               finalResponse = buildFailure();
             }
 
-            // Update DB
             await updateAllTables(formattedUuid, rawUuid, finalResponse);
 
             resolve(finalResponse);
@@ -356,14 +394,12 @@ async function sendToRMQ(formattedUuid, rawUuid, payload) {
 
       consumerTag = consumeResult.consumerTag;
 
-      // Send message to queue
       channel.sendToQueue(
         'sales_order',
         Buffer.from(JSON.stringify(payload)),
         { correlationId, replyTo: replyQueue, expiration: '38000' }
       );
 
-      // Timeout handling
       timeoutHandle = setTimeout(async () => {
         console.error('RabbitMQ RPC timeout after 38 seconds');
         const failRes = buildFailure();
@@ -382,20 +418,15 @@ async function sendToRMQ(formattedUuid, rawUuid, payload) {
   });
 }
 
-
-/* ================================
-   MAIN FLOW
-================================ */
 async function run() {
   try {
-    const data = await fetchEasyStoreOrders();
-    await processOrders(data);
+    const { data, rawUuid } = await fetchEasyStoreOrders();
+    await processOrders(data, rawUuid);
 
   } catch (err) {
     logger.downstream.error('[EasyStore] Sync failed:', err.message);
   }
 }
-
 
 const tableColumnsCache = {};
 
@@ -438,23 +469,14 @@ async function dynamicInsert(pool, tableName, data) {
   return res.rows[0]; // return full inserted row
 }
 
-
-
-/* ================================
-   EXECUTE
-================================ */
 async function scheduledRun() {
-  console.log(new Date(), '=== Starting EasyStore Orders Job ===');
+  console.log(getCurrentDateTime(), '=== Starting EasyStore Orders Job ===');
   try {
     await run();
   } catch (err) {
     console.error('Scheduled run failed:', err.message);
   }
-  console.log(new Date(), '=== Finished EasyStore Orders Job ===');
+  console.log(getCurrentDateTime(), '=== Finished EasyStore Orders Job ===');
 }
 
-// First run immediately
 scheduledRun();
-
-// Then every 30 minutes
-setInterval(scheduledRun, 30 * 60 * 1000);
