@@ -11,7 +11,7 @@ const RABBIT_URL = config.RABBITMQ_URL;
 
 const QUEUE_HANDLERS = {
   sales_order: {
-    endpoint: config.UPSTREAM_URL + config.ERP_SO_ENDPOINT
+    endpoint: config.UPSTREAM_URL + config.ERP_SALES_ORDER_ENDPOINT
   },
   check_inventory: {
     endpoint: config.UPSTREAM_URL + config.ERP_INVENTORY_ENDPOINT
@@ -112,7 +112,20 @@ async function consumeQueue(channel, queueName, handler) {
       }
 
       // ------------------ Normal processing ------------------
-      const erpResponse = await axios.post(handler.endpoint, payload);
+      const erpResponse = await Promise.race([
+        axios.post(handler.endpoint, payload),
+        new Promise((_, reject) =>
+          setTimeout(() => reject({
+            success: false,
+            data:{
+              state: "failure",
+              responseMsg: "ERP request timed out",
+              responseCode: 1
+            }
+            
+          }), 36000)
+        )
+      ]);
       const response = { success: true, data: erpResponse.data };
       channel.sendToQueue(replyTo, Buffer.from(JSON.stringify(response)), { correlationId });
       channel.ack(msg);
@@ -142,7 +155,7 @@ async function startConsumer() {
       console.log(`Successfully connected to RabbitMQ`);
 
       connection.on('error', err => {
-        logger.consumer.error('RabbitMQ connection error:', err.message);
+        logger.consumer.error(`RabbitMQ connection error: ${err.message}`);
       });
 
       connection.on('close', () => {
@@ -178,6 +191,6 @@ function sleep(ms) {
 
 // Start consumer
 startConsumer().catch(err => {
-  logger.consumer.error('Fatal consumer error:', err);
+  logger.consumer.error(`[Consumer] Fatal error: ${err.message}`);
   console.log('Fatal consumer error:', err);
 });
