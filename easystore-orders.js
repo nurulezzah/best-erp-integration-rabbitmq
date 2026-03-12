@@ -130,14 +130,22 @@ async function getLastSyncTimeFromDB() {
   return lastSync;
 }
 
-async function fetchEasyStoreOrders() {
+async function fetchEasyStoreOrders(manualMin = null, manualMax = null) {
   try {
-    const lastSync = await getLastSyncTimeFromDB(); 
-    const now = getCurrentDateTime();               
+    let updatedAtMin;
+    let updatedAtMax;
 
-    const updatedAtMin = lastSync;                  
-    const updatedAtMax = lastSyncTime(now);         
+    if (manualMin && manualMax) {
+      updatedAtMin = manualMin;
+      updatedAtMax = manualMax;
+    } else {
+      const lastSync = await getLastSyncTimeFromDB();
+      const now = getCurrentDateTime();
 
+      updatedAtMin = lastSync;
+      updatedAtMax = lastSyncTime(now);
+    }
+    
     logger.downstream.info(`Fetching orders updated between ${updatedAtMin} and ${updatedAtMax}`);
     console.log(`Fetching orders updated between ${updatedAtMin} and ${updatedAtMax}`);
     const response = await axios.get(config.EASYSTORE_URL_ORDERLIST, {
@@ -153,7 +161,7 @@ async function fetchEasyStoreOrders() {
       timeout: 15000
     });
 
-    logger.downstream.info('Fetched orders from EasyStore', response.data.orders);
+    logger.downstream.info(`Fetched orders from EasyStore: ${JSON.stringify(response.data.orders)}`);
     console.log('Fetched orders from EasyStore', response.data.orders);
 
     const rawInsert = await pool.query(`
@@ -307,7 +315,7 @@ async function processOrders(data, rawUuid) {
       });
 
       logger.downstream.info(
-        `Downstream output for order ${smf}`
+        `Downstream output for order ${JSON.stringify(smf)}`
       );
 
       console.log('Prepared SMF for RMQ:', smf);
@@ -349,7 +357,7 @@ async function sendToRMQ(formattedUuid, rawUuid, payload) {
       await channel.close();
       await connection.close();
     } catch (err) {
-      logger.downstream.error("Cleanup error:", err.message);
+      logger.downstream.error(`[Cleanup error: ${err.message}`);
     }
   };
 
@@ -372,7 +380,7 @@ async function sendToRMQ(formattedUuid, rawUuid, payload) {
             console.log('Downstream output: ', response);
             logger.downstream.info(`Response to client: ${JSON.stringify(response)}`);
 
-            if (response.success === true || response.success === 'true') {
+            if (response.data.state === true || response.data.state === 'true') {
               finalResponse = { state: 'success', responsedate: getCurrentDateTime() };
             } else {
               finalResponse = buildFailure();
@@ -383,8 +391,8 @@ async function sendToRMQ(formattedUuid, rawUuid, payload) {
             resolve(finalResponse);
 
           } catch (err) {
-            logger.downstream.error("Error processing consumer response:", err.message);
             const failRes = buildFailure();
+            logger.downstream.info(`Error processing consumer response: ${JSON.stringify(failRes)}`);
             await updateAllTables(formattedUuid, rawUuid, failRes);
             resolve(failRes);
           } finally {
@@ -420,13 +428,13 @@ async function sendToRMQ(formattedUuid, rawUuid, payload) {
   });
 }
 
-async function run() {
+async function run(updatedMin = null, updatedMax = null) {
   try {
-    const { data, rawUuid } = await fetchEasyStoreOrders();
+    const { data, rawUuid } = await fetchEasyStoreOrders(updatedMin, updatedMax);
     await processOrders(data, rawUuid);
 
   } catch (err) {
-    logger.downstream.error('[EasyStore] Sync failed:', err.message);
+    logger.downstream.error(`[EasyStore] Sync failed: ${err.message}`);
   }
 }
 
@@ -471,13 +479,18 @@ async function dynamicInsert(pool, tableName, data) {
   return res.rows[0]; // return full inserted row
 }
 
+const manualMin = process.argv[2];
+const manualMax = process.argv[3];
+
 async function scheduledRun() {
   console.log(getCurrentDateTime(), '=== Starting EasyStore Orders Job ===');
+
   try {
-    await run();
+    await run(manualMin, manualMax);
   } catch (err) {
     console.error('Scheduled run failed:', err.message);
   }
+
   console.log(getCurrentDateTime(), '=== Finished EasyStore Orders Job ===');
 }
 
