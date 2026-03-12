@@ -11,7 +11,7 @@ const RABBIT_URL = config.RABBITMQ_URL;
 
 const QUEUE_HANDLERS = {
   sales_order: {
-    endpoint: config.UPSTREAM_URL + config.ERP_SALES_ORDER_ENDPOINT
+    endpoint: config.UPSTREAM_URL + config.ERP_SO_ENDPOINT
   },
   check_inventory: {
     endpoint: config.UPSTREAM_URL + config.ERP_INVENTORY_ENDPOINT

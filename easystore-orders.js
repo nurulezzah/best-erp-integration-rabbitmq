@@ -380,7 +380,7 @@ async function sendToRMQ(formattedUuid, rawUuid, payload) {
             console.log('Downstream output: ', response);
             logger.downstream.info(`Response to client: ${JSON.stringify(response)}`);
 
-            if (response.data.state === true || response.data.state === 'true') {
+            if (response.data.state === 'success') {
               finalResponse = { state: 'success', responsedate: getCurrentDateTime() };
             } else {
               finalResponse = buildFailure();
