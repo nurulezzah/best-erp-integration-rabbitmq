@@ -1,12 +1,12 @@
-const pool = require('./db');
+const pool = require('../db');
 const path = require('path');
-const loadConfig = require('./config/envLoader');
+const loadConfig = require('../config/envLoader');
 
 const configPath = path.resolve(__dirname, './config/app.conf');
 const config = loadConfig(configPath);
 
 const axios = require('axios');
-const logger = require('./logger'); 
+const logger = require('../logger'); 
 const amqp = require('amqplib');
 const { v4: uuidv4 } = require('uuid');
 
@@ -156,9 +156,8 @@ async function fetchEasyStoreOrders(manualMin = null, manualMax = null) {
         financial_status: 'paid',
         updated_at_min: updatedAtMin,
         updated_at_max: updatedAtMax,
-        fulfillment_status: 'unfulfilled'
-      },
-      timeout: 15000
+        fulfillment_status: 'fulfilled'
+      }
     });
 
     logger.downstream.info(`Fetched orders from EasyStore: ${JSON.stringify(response.data.orders)}`);
@@ -202,130 +201,150 @@ async function processOrders(data, rawUuid) {
     let paid_at= convertToMYT(order.paid_at);
     let order_created = convertToMYT(order.created_at);
 
-    try {
-      const formatted = await dynamicInsert(
-        pool,
-        'easystore_so_downstream_input_formatted',
-        {
-          rawuuid: rawUuid,
-          ...order,
-          subtotal_price: parseFloat(order.subtotal_price),
-          total_discount: parseFloat(order.total_discount),
-          total_amount: parseFloat(order.total_amount),
-          total_price: parseFloat(order.total_price),
-          total_shipping: parseFloat(order.total_shipping),
-          customer: JSON.stringify(order.customer),
-          line_items: JSON.stringify(order.line_items),
-          shipping_address: JSON.stringify(order.shipping_address),
-          fulfillments: JSON.stringify(order.fulfillments),
-          order_created: order_created,
-          paid_at: paid_at,
-          note: order.note
+    try{
+      if ( order.fulfillments &&  order.fulfillments.length === 1) {
+        try {
+          const formatted = await dynamicInsert(
+            pool,
+            'easystore_so_downstream_input_formatted',
+            {
+              rawuuid: rawUuid,
+              ...order,
+              subtotal_price: parseFloat(order.subtotal_price),
+              total_discount: parseFloat(order.total_discount),
+              total_amount: parseFloat(order.total_amount),
+              total_price: parseFloat(order.total_price),
+              total_shipping: parseFloat(order.total_shipping),
+              customer: JSON.stringify(order.customer),
+              line_items: JSON.stringify(order.line_items),
+              shipping_address: JSON.stringify(order.shipping_address),
+              fulfillments: JSON.stringify(order.fulfillments),
+              order_created: order_created,
+              paid_at: paid_at,
+              note: order.note
+            }
+          );
+
+          if (!formatted) continue;
+
+          const formattedUuid = formatted.uuid;
+
+          const sideInsertTasks = [];
+
+          if (order.customer) {
+            sideInsertTasks.push(
+              dynamicInsert(pool, 'easystore_so_customer', {
+                downstream_input_uuid: formattedUuid,
+                ...order.customer,
+                total_spent: parseFloat(order.customer.total_spent)
+              })
+            );
+          }
+
+          if (order.shipping_address) {
+            sideInsertTasks.push(
+              dynamicInsert(pool, 'easystore_so_shipping_address', {
+                downstream_input_uuid: formattedUuid,
+                ...order.shipping_address
+              })
+            );
+          }
+
+          if (order.fulfillments) {
+            sideInsertTasks.push(
+              dynamicInsert(pool, 'easystore_so_fulfillments', {
+                downstream_input_uuid: formattedUuid,
+                ...order.fulfillments[0]
+              })
+            );
+          }
+
+          await Promise.all(sideInsertTasks);
+
+          const skuList = [];
+
+          const skuTasks = order.line_items.map(item => {
+
+            skuList.push({
+              sku: item.sku,
+              payAmount: parseFloat(order.total_amount),
+              paymentPrice: parseFloat(item.price),
+              quantity: item.quantity
+            });
+
+            return Promise.all([
+              dynamicInsert(pool, 'easystore_so_line_items', {
+                downstream_input_uuid: formattedUuid,
+                ...item,
+                price: parseFloat(item.price),
+                total_discount: parseFloat(item.total_discount),
+                total_tax: parseFloat(item.total_tax),
+                total_amount: parseFloat(item.total_amount),
+                fulfillment_service: JSON.stringify(item.fulfillment_service)
+              }),
+
+              dynamicInsert(pool, 'easystore_so_output_sku', {
+                downstream_input_uuid: formattedUuid,
+                sku: item.sku,
+                payamount: parseFloat(order.total_amount),
+                quantity: item.quantity
+              })
+            ]);
+          });
+
+          await Promise.all(skuTasks);
+
+          const smf = {
+            appid: 60163222354,
+            servicetype: 'CREATE_SALES_ORDER',
+            shop: shop,
+            onlineordernumber: formatted.number,
+            trackingnumber: order.fulfillments[0].tracking_number || null,
+            carrier: order.fulfillments[0].tracking_company || null,
+            paymentmethod: "PAY_ONLINE",
+            codpayamount: 0.00,
+            paytime: paid_at,
+            skuList: skuList,
+            receivername: [
+              order.shipping_address?.first_name,
+              order.shipping_address?.last_name
+            ].filter(Boolean).join(' '),
+            receiverphone: order.shipping_address?.phone,
+            receiveraddress: [
+              order.shipping_address?.address1,
+              order.shipping_address?.address2
+            ].filter(Boolean).join(', '),
+            receiverpostcode: order.shipping_address?.zip,
+            receivercity: order.shipping_address?.city,
+            receiverprovince: order.shipping_address?.province,
+            receivercountry: 'MY'
+          };
+
+          await dynamicInsert(pool, 'easystore_so_downstream_output', {
+            downstream_input_uuid: formattedUuid,
+            ...smf,
+            sku: JSON.stringify(smf.skuList)
+          });
+
+          logger.downstream.info(
+            `Downstream output for order ${JSON.stringify(smf)}`
+          );
+
+          console.log('Prepared SMF for RMQ:', smf);
+          rmqTasks.push(
+            sendToRMQ(formattedUuid, rawUuid,smf)
+          );
+
+        } catch (err) {
+          logger.downstream.error(`Order ${order.id} failed:`, err.message);
         }
-      );
-
-      if (!formatted) continue;
-
-      const formattedUuid = formatted.uuid;
-
-      const sideInsertTasks = [];
-
-      if (order.customer) {
-        sideInsertTasks.push(
-          dynamicInsert(pool, 'easystore_so_customer', {
-            downstream_input_uuid: formattedUuid,
-            ...order.customer,
-            total_spent: parseFloat(order.customer.total_spent)
-          })
-        );
       }
-
-      if (order.shipping_address) {
-        sideInsertTasks.push(
-          dynamicInsert(pool, 'easystore_so_shipping_address', {
-            downstream_input_uuid: formattedUuid,
-            ...order.shipping_address
-          })
-        );
-      }
-
-      await Promise.all(sideInsertTasks);
-
-      const skuList = [];
-
-      const skuTasks = order.line_items.map(item => {
-
-        skuList.push({
-          sku: item.sku,
-          payAmount: parseFloat(order.total_amount),
-          paymentPrice: parseFloat(item.price),
-          quantity: item.quantity
-        });
-
-        return Promise.all([
-          dynamicInsert(pool, 'easystore_so_line_items', {
-            downstream_input_uuid: formattedUuid,
-            ...item,
-            price: parseFloat(item.price),
-            total_discount: parseFloat(item.total_discount),
-            total_tax: parseFloat(item.total_tax),
-            total_amount: parseFloat(item.total_amount),
-            fulfillment_service: JSON.stringify(item.fulfillment_service)
-          }),
-
-          dynamicInsert(pool, 'easystore_so_output_sku', {
-            downstream_input_uuid: formattedUuid,
-            sku: item.sku,
-            payamount: parseFloat(order.total_amount),
-            quantity: item.quantity
-          })
-        ]);
-      });
-
-      await Promise.all(skuTasks);
-
-      const smf = {
-        appid: 60163222354,
-        servicetype: 'CREATE_SALES_ORDER',
-        shop: shop,
-        onlineordernumber: formatted.number,
-        paymentmethod: "PAY_ONLINE",
-        codpayamount: 0.00,
-        paytime: paid_at,
-        skuList: skuList,
-        receivername: [
-          order.shipping_address?.first_name,
-          order.shipping_address?.last_name
-        ].filter(Boolean).join(' '),
-        receiverphone: order.shipping_address?.phone,
-        receiveraddress: [
-          order.shipping_address?.address1,
-          order.shipping_address?.address2
-        ].filter(Boolean).join(', '),
-        receiverpostcode: order.shipping_address?.zip,
-        receivercity: order.shipping_address?.city,
-        receiverprovince: order.shipping_address?.province,
-        receivercountry: 'MY'
-      };
-
-      await dynamicInsert(pool, 'easystore_so_downstream_output', {
-        downstream_input_uuid: formattedUuid,
-        ...smf,
-        sku: JSON.stringify(smf.skuList)
-      });
-
-      logger.downstream.info(
-        `Downstream output for order ${JSON.stringify(smf)}`
-      );
-
-      console.log('Prepared SMF for RMQ:', smf);
-      rmqTasks.push(
-        sendToRMQ(formattedUuid, rawUuid,smf)
-      );
-
-    } catch (err) {
-      logger.downstream.error(`Order ${order.id} failed:`, err.message);
+    } catch(err) {
+      console.error('Error processing fulfillments:', err.message);
+      const failRes = buildFailure(2);
+        await updateAllTables(formattedUuid, rawUuid, failRes);
     }
+
   }
 
   if (rmqTasks.length) {
