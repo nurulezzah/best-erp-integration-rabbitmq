@@ -1,12 +1,12 @@
-const pool = require('./db');
+const pool = require('../db');
 const path = require('path');
-const loadConfig = require('./config/envLoader');
+const loadConfig = require('../config/envLoader');
 
-const configPath = path.resolve(__dirname, './config/app.conf');
+const configPath = path.resolve(__dirname, '../config/app.conf');
 const config = loadConfig(configPath);
-
+config.EASYSTORES = JSON.parse(config.EASYSTORES);
 const axios = require('axios');
-const logger = require('./logger'); 
+const logger = require('../logger'); 
 const amqp = require('amqplib');
 const { v4: uuidv4 } = require('uuid');
 
@@ -130,7 +130,7 @@ async function getLastSyncTimeFromDB() {
   return lastSync;
 }
 
-async function fetchEasyStoreOrders(manualMin = null, manualMax = null) {
+async function fetchEasyStoreOrders(store, manualMin = null, manualMax = null) {
   try {
     let updatedAtMin;
     let updatedAtMax;
@@ -148,9 +148,9 @@ async function fetchEasyStoreOrders(manualMin = null, manualMax = null) {
     
     logger.downstream.info(`Fetching orders updated between ${updatedAtMin} and ${updatedAtMax}`);
     console.log(`Fetching orders updated between ${updatedAtMin} and ${updatedAtMax}`);
-    const response = await axios.get(config.EASYSTORE_URL_ORDERLIST, {
+    const response = await axios.get(store.url, {
       headers: {
-        'EasyStore-Access-Token': config.EASYSTORE_TOKEN
+        'EasyStore-Access-Token': store.token
       },
       params: {
         financial_status: 'paid',
@@ -178,11 +178,11 @@ async function fetchEasyStoreOrders(manualMin = null, manualMax = null) {
   }
 }
 
-async function processOrders(data, rawUuid) {
+async function processOrders(data, rawUuid, store) {
 
   const orders = data.orders || [];
   if (!orders.length) return;
-  const searchTerm = config.EASYSTORE_CLIENT;
+  const searchTerm = store.client;
   const clientRes = await pool.query(
     `SELECT * FROM client_data WHERE client ILIKE $1`,
     [searchTerm]
@@ -428,12 +428,28 @@ async function sendToRMQ(formattedUuid, rawUuid, payload) {
 }
 
 async function run(updatedMin = null, updatedMax = null) {
-  try {
-    const { data, rawUuid } = await fetchEasyStoreOrders(updatedMin, updatedMax);
-    await processOrders(data, rawUuid);
+  let stores = config.EASYSTORES;
+  if (!Array.isArray(stores)) {
+    throw new Error('EASYSTORES must be an array');
+  }
+  console.log('EASYSTORES parsed:', JSON.stringify(stores, null, 2));
+  for (const store of stores) {
+    try {
+      console.log(`\n=== Processing ${store?.name || store?.client || 'UNKNOWN STORE'} ===`);
 
-  } catch (err) {
-    logger.downstream.error(`[EasyStore] Sync failed: ${err.message}`);
+      const { data, rawUuid } = await fetchEasyStoreOrders(
+        store,
+        updatedMin,
+        updatedMax
+      );
+
+      await processOrders(data, rawUuid, store);
+
+    } catch (err) {
+      logger.downstream.error(
+        `[${store.name}] Sync failed: ${err.message}`
+      );
+    }
   }
 }
 
