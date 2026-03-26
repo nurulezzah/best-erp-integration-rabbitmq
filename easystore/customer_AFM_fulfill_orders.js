@@ -109,7 +109,7 @@ function lastSyncTime(mytTime) {
 async function getLastSyncTimeFromDB() {
   const res = await pool.query(`
     SELECT last_sync_time
-    FROM easystore_so_downstream_input_raw
+    FROM last_sync_times
     WHERE last_sync_time IS NOT NULL
     ORDER BY last_sync_time DESC
     LIMIT 1;
@@ -164,10 +164,10 @@ async function fetchEasyStoreOrders(store, manualMin = null, manualMax = null) {
     console.log('Fetched orders from EasyStore', response.data.orders);
 
     const rawInsert = await pool.query(`
-      INSERT INTO easystore_so_downstream_input_raw (rawdata, last_sync_time)
-      VALUES ($1, $2)
+      INSERT INTO easystore_so_downstream_input_raw (rawdata)
+      VALUES ($1)
       RETURNING *
-    `, [JSON.stringify(response.data), updatedAtMax]);
+    `, [JSON.stringify(response.data)]);
 
     const rawUuid = rawInsert.rows[0].uuid;
     return { data: response.data, rawUuid };
@@ -287,7 +287,7 @@ async function processOrders(data, rawUuid, store) {
         appid: 60163222354,
         servicetype: 'CREATE_SALES_ORDER',
         shop: shop,
-        onlineordernumber: formatted.number,
+        onlineordernumber: `${store.code}${formatted.number}`,
         paymentmethod: "PAY_ONLINE",
         codpayamount: 0.00,
         paytime: paid_at,
@@ -432,26 +432,29 @@ async function run(updatedMin = null, updatedMax = null) {
   if (!Array.isArray(stores)) {
     throw new Error('EASYSTORES must be an array');
   }
-  console.log('EASYSTORES parsed:', JSON.stringify(stores, null, 2));
+
   for (const store of stores) {
     try {
       console.log(`\n=== Processing ${store?.name || store?.client || 'UNKNOWN STORE'} ===`);
 
-      const { data, rawUuid } = await fetchEasyStoreOrders(
-        store,
-        updatedMin,
-        updatedMax
-      );
-
+      const { data, rawUuid } = await fetchEasyStoreOrders(store,updatedMin,updatedMax);
       await processOrders(data, rawUuid, store);
-
     } catch (err) {
       logger.downstream.error(
         `[${store.name}] Sync failed: ${err.message}`
       );
     }
   }
+  const fetchTime = lastSyncTime(getCurrentDateTime());
+
+  await pool.query(`
+    INSERT INTO last_sync_times (last_sync_time)
+    VALUES ($1)
+  `, [fetchTime]);
+
+  // await processOrders(data, rawUuid, store);
 }
+
 
 const tableColumnsCache = {};
 
