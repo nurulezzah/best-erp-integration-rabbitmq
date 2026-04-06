@@ -10,6 +10,49 @@ const logger = require('../logger');
 const amqp = require('amqplib');
 const { v4: uuidv4 } = require('uuid');
 
+const RABBIT_URL = `amqp://${config.RABBITMQ_USER}:${config.RABBITMQ_PASS}@${config.RABBITMQ_HOST}:${config.RABBITMQ_PORT}/${config.RABBITMQ_VHOST}`;
+let connection;
+let channel;
+let replyQueue;
+const pendingRequests = new Map();
+
+async function initRMQ() {
+  connection = await amqp.connect(RABBIT_URL);
+  channel = await connection.createChannel();
+
+  await channel.assertQueue('sales_order', { durable: true });
+
+  // Create ONE reply queue for all requests
+  const q = await channel.assertQueue('', { exclusive: true });
+  replyQueue = q.queue;
+
+  // ONE consumer for all responses
+  await channel.consume(
+    replyQueue,
+    async (msg) => {
+      if (!msg) return;
+
+      const correlationId = msg.properties.correlationId;
+      const handler = pendingRequests.get(correlationId);
+
+      if (!handler) return;
+
+      pendingRequests.delete(correlationId);
+
+      try {
+        const response = JSON.parse(msg.content.toString());
+        await handler.resolve(response);
+      } catch (err) {
+        await handler.reject(err);
+      }
+    },
+    { noAck: true }
+  );
+
+  console.log('RMQ initialized');
+}
+
+
 function getCurrentDateTime() {
   const now = new Date();
   const year = now.getFullYear();
@@ -108,14 +151,14 @@ function lastSyncTime(mytTime) {
 
 async function getLastSyncTimeFromDB() {
   const res = await pool.query(`
-    SELECT last_sync_time
+    SELECT so_last_sync_time
     FROM last_sync_times
-    WHERE last_sync_time IS NOT NULL
-    ORDER BY last_sync_time DESC
+    WHERE so_last_sync_time IS NOT NULL
+    ORDER BY so_last_sync_time DESC
     LIMIT 1;
   `);
 
-  let lastSync = res.rows[0]?.last_sync_time;
+  let lastSync = res.rows[0]?.so_last_sync_time;
 
   if (!lastSync) {
      // Table is empty → fallback to TODAY at 12:00:00 MYT
@@ -148,7 +191,7 @@ async function fetchEasyStoreOrders(store, manualMin = null, manualMax = null) {
     
     logger.downstream.info(`Fetching orders updated between ${updatedAtMin} and ${updatedAtMax}`);
     console.log(`Fetching orders updated between ${updatedAtMin} and ${updatedAtMax}`);
-    const response = await axios.get(store.url, {
+    const response = await axios.get(store.so_url, {
       headers: {
         'EasyStore-Access-Token': store.token
       },
@@ -336,94 +379,62 @@ async function processOrders(data, rawUuid, store) {
 }
 
 // Main function to send data to RMQ and wait for response
-async function sendToRMQ(formattedUuid, rawUuid, payload) {
-  const RABBIT_URL = `amqp://${config.RABBITMQ_USER}:${config.RABBITMQ_PASS}@${config.RABBITMQ_HOST}:${config.RABBITMQ_PORT}/${config.RABBITMQ_VHOST}`;
-
-  const connection = await amqp.connect(RABBIT_URL);
-  const channel = await connection.createChannel();
-
-  await channel.assertQueue('sales_order', { durable: true });
-  const { queue: replyQueue } = await channel.assertQueue('', { exclusive: true });
+async function sendToRMQ(formattedUuid, rawUuid, payload, store) {
   const correlationId = uuidv4();
 
-  let timeoutHandle;
-  let consumerTag;
+  return new Promise((resolve) => {
+    const timeout = setTimeout(async () => {
+      console.error('RabbitMQ RPC timeout');
+      logger.downstream.error('RabbitMQ RPC timeout');
+      pendingRequests.delete(correlationId);
 
-  const cleanup = async () => {
-    try {
-      if (timeoutHandle) clearTimeout(timeoutHandle);
-      if (consumerTag) await channel.cancel(consumerTag);
-      await channel.close();
-      await connection.close();
-    } catch (err) {
-      logger.downstream.error(`[Cleanup error: ${err.message}`);
-    }
-  };
-
-  return new Promise(async (resolve) => {
-    try {
-
-      const consumeResult = await channel.consume(
-        replyQueue,
-        async (msg) => {
-          if (!msg) return;
-          if (msg.properties.correlationId !== correlationId) return;
-
-          clearTimeout(timeoutHandle);
-
-          let finalResponse;
-          try {
-            const raw = msg.content.toString();
-            const response = JSON.parse(raw);
-
-            console.log('Downstream output: ', response);
-            logger.downstream.info(`Response to client: ${JSON.stringify(response)}`);
-
-            if (response.data.state === 'success') {
-              finalResponse = { state: 'success', responsedate: getCurrentDateTime() };
-            } else {
-              finalResponse = buildFailure();
-            }
-
-            await updateAllTables(formattedUuid, rawUuid, finalResponse);
-
-            resolve(finalResponse);
-
-          } catch (err) {
-            const failRes = buildFailure();
-            logger.downstream.info(`Error processing consumer response: ${JSON.stringify(failRes)}`);
-            await updateAllTables(formattedUuid, rawUuid, failRes);
-            resolve(failRes);
-          } finally {
-            await cleanup();
-          }
-        },
-        { noAck: true }
-      );
-
-      consumerTag = consumeResult.consumerTag;
-
-      channel.sendToQueue(
-        'sales_order',
-        Buffer.from(JSON.stringify(payload)),
-        { correlationId, replyTo: replyQueue, expiration: '38000' }
-      );
-
-      timeoutHandle = setTimeout(async () => {
-        console.error('RabbitMQ RPC timeout after 38 seconds');
-        const failRes = buildFailure();
-        await updateAllTables(formattedUuid, rawUuid, failRes);
-        await cleanup();
-        resolve(failRes);
-      }, 38000);
-
-    } catch (err) {
-      console.error("Failed to send to queue:", err.message);
-      const failRes = buildFailure(21);
+      const failRes = buildFailure(1);
       await updateAllTables(formattedUuid, rawUuid, failRes);
-      await cleanup();
+      logger.downstream.info(`RMQ Failure: ${JSON.stringify(failRes)}`);
       resolve(failRes);
-    }
+    }, 38000);
+
+    pendingRequests.set(correlationId, {
+      resolve: async (response) => {
+        clearTimeout(timeout);
+
+        let finalResponse;
+
+        try {
+          if (response.data.state === 'success') {
+            finalResponse = { state: 'success', responsedate: getCurrentDateTime() };
+          } else {
+            finalResponse = buildFailure();
+          }
+
+          await updateAllTables(formattedUuid, rawUuid, finalResponse);
+          logger.downstream.info(`Final Response: ${JSON.stringify(finalResponse)}`);
+          resolve(finalResponse);
+
+        } catch (err) {
+          const failRes = buildFailure();
+          await updateAllTables(formattedUuid, rawUuid, failRes);
+          logger.downstream.info(`Final Response: ${JSON.stringify(failRes)}`);
+          resolve(failRes);
+        }
+      },
+      reject: async () => {
+        clearTimeout(timeout);
+        const failRes = buildFailure(1);
+        await updateAllTables(formattedUuid, rawUuid, failRes);
+        resolve(failRes);
+      }
+    });
+
+    channel.sendToQueue(
+      'sales_order',
+      Buffer.from(JSON.stringify(payload)),
+      {
+        correlationId,
+        replyTo: replyQueue,
+        expiration: '38000'
+      }
+    );
   });
 }
 
@@ -448,13 +459,26 @@ async function run(updatedMin = null, updatedMax = null) {
   const fetchTime = lastSyncTime(getCurrentDateTime());
 
   await pool.query(`
-    INSERT INTO last_sync_times (last_sync_time)
+    INSERT INTO last_sync_times (so_last_sync_time)
     VALUES ($1)
   `, [fetchTime]);
 
   // await processOrders(data, rawUuid, store);
 }
 
+async function shutdown() {
+  try {
+
+    if (channel) await channel.close();
+    if (connection) await connection.close();
+    await pool.end();
+
+    process.exit(0); // force exit
+  } catch (err) {
+    console.error('Shutdown error:', err.message);
+    process.exit(1);
+  }
+}
 
 const tableColumnsCache = {};
 
@@ -504,12 +528,15 @@ async function scheduledRun() {
   console.log(getCurrentDateTime(), '=== Starting EasyStore Orders Job ===');
 
   try {
+    await initRMQ();
     await run(manualMin, manualMax);
   } catch (err) {
     console.error('Scheduled run failed:', err.message);
   }
 
   console.log(getCurrentDateTime(), '=== Finished EasyStore Orders Job ===');
+  await shutdown();
 }
+
 
 scheduledRun();
