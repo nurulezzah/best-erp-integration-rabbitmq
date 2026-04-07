@@ -20,7 +20,6 @@ let channel;
 let replyQueue;
 const pendingRequests = new Map();
 
-
 const buildFailure = (code = 1) => ({
   state: 'failure',
   responsecode: code,
@@ -153,8 +152,26 @@ async function initRMQ() {
   console.log('RMQ initialized');
 }
 
+async function fetchOrders(store,page) { 
+  try {
+    const response = await axios.get(store.get_inventory_url, {
+      headers: {
+        'EasyStore-Access-Token': store.token
+      },
+      params: {
+        page: page,
+        limit:5
+      }
+    });
+    // logger.downstream.info(`Fetched orders from EasyStore ${store.name}: ${JSON.stringify(response.data)}`);
+    return response.data;
+  } catch (error) {
+    console.error('[EasyStore] API Error:', error.response?.data || error.message);
+    throw error;
+  }
 
-async function fetchEasyStoreOrders(store,manualMin = null, manualMax = null) {
+}
+async function fetchEasyStoreOrders(store, manualMin = null, manualMax = null) {
   try {
     let updatedAtMin;
     let updatedAtMax;
@@ -169,25 +186,36 @@ async function fetchEasyStoreOrders(store,manualMin = null, manualMax = null) {
       updatedAtMin = lastSync;
       updatedAtMax = lastSyncTime(now);
     }
-    
+
     logger.downstream.info(`Fetching orders updated between ${updatedAtMin} and ${updatedAtMax}`);
     console.log(`Fetching orders updated between ${updatedAtMin} and ${updatedAtMax}`);
-    const response = await axios.get(store.get_inventory_url, {
-      headers: {
-        'EasyStore-Access-Token': store.token
-      }
-    });
 
-    logger.downstream.info(`Fetched orders from EasyStore ${store.name}: ${JSON.stringify(response.data)}`);
+    // Fetch first page to get page_count
+    const firstPage = await fetchOrders(store, 1);
+    const page_count = firstPage.page_count || 1; // fallback if page_count is missing
 
-    const rawInsert = await pool.query(`
-      INSERT INTO easystore_inv_downstream_input_raw (rawdata)
-      VALUES ($1)
-      RETURNING *
-    `, [JSON.stringify(response.data)]);
+    for (let page = 1; page <= page_count; page++) {
+      const res = page === 1 ? firstPage : await fetchOrders(store, page);
 
-    const rawUuid = rawInsert.rows[0].uuid;
-    return { data: response.data, rawUuid };
+      console.log(`Fetched page ${page} for ${store.name}`);
+
+      // Insert full response per page into raw table
+      const rawInsert = await pool.query(`
+        INSERT INTO easystore_inv_downstream_input_raw (rawdata)
+        VALUES ($1)
+        RETURNING uuid
+      `, [JSON.stringify(res)]);
+
+      const rawUuid = rawInsert.rows[0].uuid;
+
+      console.log("res",res);
+      // Process this page immediately
+      await processOrders(res, rawUuid, store);
+
+      console.log(`Inserted and processed page ${page}, uuid: ${rawUuid}`);
+    }
+
+    console.log(`Finished all pages for store ${store.name}`);
 
   } catch (error) {
     console.error('[EasyStore] API Error:', error.response?.data || error.message);
@@ -205,84 +233,100 @@ async function processOrders(data, rawUuid, store) {
   );
 
   if (!clientRes.rows.length) {
-    throw new Error('Client not found');
+    const failRes = buildFailure();
+    await updateAllTables(null, rawUuid, failRes, 1);
+    return;
   }
 
   const warehouse = clientRes.rows[0].warehouse;
 
   const rmqTasks = [];
 
-  for (let page = 1; page <= orders.page_count; page++) {
-    let products = orders.products || [];
+  let products = orders.products || [];
+  let formattedUuid = null;
 
-    for (const product of products) {
-      try {
-        if (!product.variants || product.variants.length !== 1) {
-          console.log(`Skipping product ${product.id} — invalid variants`);
-          continue;
-        }
-
-        const variant = product.variants[0];
-
-        // SKU check
-        if (!variant?.sku || variant.sku.trim() === '') {
-          console.log(`Skipping product ${product.id} — SKU missing/empty`);
-          continue;
-        }
-
-        const formatted = await dynamicInsert(
-          pool,
-          'easystore_inv_downstream_variants',
-          {
-            rawuuid: rawUuid,
-            total_count: orders.total_count,
-            page_count: orders.page_count,
-            page: orders.page,
-            variants_id: variant.id,
-            product_id: variant.product_id,
-            name: variant.name,
-            sku: variant.sku,
-            price: parseFloat(variant.price),
-            inventory_quantity: variant.inventory_quantity,
-            inventory_management: variant.inventory_management
-          }
-        );
-
-        if (!formatted) continue;
-
-        const formattedUuid = formatted.uuid;
-
-        const smf = {
-          appid: appid,
-          servicetype: servicetype,
-          sku: variant.sku,
-          warehouse: warehouse
-        };
-
-        await dynamicInsert(
-          pool,
-          'easystore_inv_downstream_output',
-          {
-            downstream_input_uuid: formattedUuid,
-            ...smf
-          }
-        );
-
-        logger.downstream.info(`Downstream output for order ${JSON.stringify(smf)}`);
-        console.log('Prepared SMF for RMQ:', smf);
-
-        rmqTasks.push(sendToRMQ(formattedUuid, rawUuid, smf, store));
-
-
-      } catch (err) {
-        console.error('Error processing product:', err.message);
+  for (const product of products) {
+    try {
+      if (!product.variants || product.variants.length !== 1) {
+        console.log(`Skipping product ${product.id} — invalid variants`);
+        continue;
       }
+
+      const variant = product.variants[0];
+
+      // SKU check
+      if (!variant?.sku || variant.sku.trim() === '') {
+        console.log(`Skipping product ${product.id} — SKU missing/empty`);
+        continue;
+      }
+
+      console.log("sku in variants",variant.sku);
+
+      // --- Fetch matching data from inv_biz_content_result ---
+      const bizRes = await pool.query(
+        `SELECT * FROM inv_biz_content_result WHERE sku = $1`,
+        [variant.sku]
+      );
+
+      let bizData = null;
+      if (bizRes.rows.length > 0) {
+        bizData = bizRes.rows[0];
+        console.log(`Found matching inv_biz_content_result for SKU ${variant.sku}:`, bizData);
+      } else {
+        console.log(`No matching inv_biz_content_result for SKU ${variant.sku}`);
+      }
+      const formatted = await dynamicInsert(
+        pool,
+        'easystore_inv_downstream_variants',
+        {
+          rawuuid: rawUuid,
+          total_count: orders.total_count,
+          page_count: orders.page_count,
+          page: orders.page,
+          variants_id: variant.id,
+          product_id: variant.product_id,
+          name: variant.name,
+          sku: variant.sku,
+          price: parseFloat(variant.price),
+          inventory_quantity: variant.inventory_quantity,
+          inventory_management: variant.inventory_management
+        }
+      );
+
+      if (!formatted) continue;
+
+      formattedUuid = formatted.uuid;
+
+      const smf = {
+        appid: appid,
+        servicetype: servicetype,
+        sku: variant.sku,
+        warehouse: warehouse
+      };
+
+      await dynamicInsert(
+        pool,
+        'easystore_inv_downstream_output',
+        {
+          downstream_input_uuid: formattedUuid,
+          ...smf
+        }
+      );
+
+      logger.downstream.info(`Downstream output for order ${JSON.stringify(smf)}`);
+      console.log('Prepared SMF for RMQ:', smf);
+
+      rmqTasks.push(sendToRMQ(formattedUuid, rawUuid, smf, store));
+
+
+    } catch (err) {
+      const failRes = buildFailure();
+      await updateAllTables(formattedUuid, rawUuid, failRes, 1);
+      console.error('Error processing product:', err.message);
     }
-    
   }
+    
   await Promise.all(rmqTasks);
-
-
 }
 
 
@@ -381,6 +425,8 @@ async function UpdateInventory(data, formatteduuid,store) {
 
     }catch(err) {
       console.error('Error fetching variant for inventory update:', err.message);
+      const failRes = buildFailure();
+      await updateAllTables(formatteduuid, null, failRes, 1);
       return;
     }
 }
@@ -441,31 +487,22 @@ async function shutdown() {
 }
 
 async function run(updatedMin = null, updatedMax = null) {
-  let stores = config.EASYSTORES;
-  if (!Array.isArray(stores)) {
-    throw new Error('EASYSTORES must be an array');
-  }
+  const stores = config.EASYSTORES;
+  if (!Array.isArray(stores)) throw new Error('EASYSTORES must be an array');
 
   for (const store of stores) {
     try {
       console.log(`\n=== Processing ${store?.name || store?.client || 'UNKNOWN STORE'} ===`);
-
-      const { data, rawUuid } = await fetchEasyStoreOrders(store,updatedMin,updatedMax);
-      await processOrders(data, rawUuid, store);
+      await fetchEasyStoreOrders(store, updatedMin, updatedMax);
     } catch (err) {
-      logger.downstream.error(
-        `[${store.name}] Sync failed: ${err.message}`
-      );
+      logger.downstream.error(`[${store.name}] Sync failed: ${err.message}`);
     }
   }
+
   const fetchTime = lastSyncTime(getCurrentDateTime());
-
-  await pool.query(`
-    INSERT INTO last_sync_times (inv_last_sync_time)
-    VALUES ($1)
-  `, [fetchTime]);
-
+  await pool.query(`INSERT INTO last_sync_times (inv_last_sync_time) VALUES ($1)`, [fetchTime]);
 }
+
 const manualMin = process.argv[2];
 const manualMax = process.argv[3];
 
@@ -482,5 +519,4 @@ async function scheduledRun() {
   console.log(getCurrentDateTime(), '=== Finished EasyStore Orders Job ===');
   await shutdown();
 }
-
 scheduledRun();
