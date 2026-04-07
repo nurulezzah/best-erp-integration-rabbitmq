@@ -260,25 +260,17 @@ async function processOrders(data, rawUuid, store) {
         continue;
       }
 
-      console.log("sku in variants",variant.sku);
-
-      // --- Fetch matching data from inv_biz_content_result ---
-      const bizRes = await pool.query(
-        `SELECT * FROM inv_biz_content_result WHERE sku = $1`,
+      // --- Check if variant SKU already exists in downstream_variants ---
+      const existingRes = await pool.query(
+        `SELECT uuid FROM easystore_inv_downstream_variants WHERE sku = $1`,
         [variant.sku]
       );
 
-      let bizData = null;
-      if (bizRes.rows.length > 0) {
-        bizData = bizRes.rows[0];
-        console.log(`Found matching inv_biz_content_result for SKU ${variant.sku}:`, bizData);
-      } else {
-        console.log(`No matching inv_biz_content_result for SKU ${variant.sku}`);
-      }
-      const formatted = await dynamicInsert(
-        pool,
-        'easystore_inv_downstream_variants',
-        {
+      let formatted;
+      if (existingRes.rows.length > 0) {
+        // SKU exists → UPDATE
+        const uuidToUpdate = existingRes.rows[0].uuid;
+        const updateFields = {
           rawuuid: rawUuid,
           total_count: orders.total_count,
           page_count: orders.page_count,
@@ -286,12 +278,47 @@ async function processOrders(data, rawUuid, store) {
           variants_id: variant.id,
           product_id: variant.product_id,
           name: variant.name,
-          sku: variant.sku,
           price: parseFloat(variant.price),
           inventory_quantity: variant.inventory_quantity,
           inventory_management: variant.inventory_management
-        }
-      );
+        };
+
+        const setClause = Object.keys(updateFields)
+          .map((key, idx) => `${key} = $${idx + 1}`)
+          .join(", ");
+
+        await pool.query(
+          `UPDATE easystore_inv_downstream_variants SET ${setClause} WHERE uuid = $${Object.keys(updateFields).length + 1}`,
+          [...Object.values(updateFields), uuidToUpdate]
+        );
+
+        // fetch the updated row
+        const updatedRes = await pool.query(
+          `SELECT * FROM easystore_inv_downstream_variants WHERE uuid = $1`,
+          [uuidToUpdate]
+        );
+        formatted = updatedRes.rows[0];
+
+      } else {
+        // SKU does not exist → INSERT
+        formatted = await dynamicInsert(
+          pool,
+          'easystore_inv_downstream_variants',
+          {
+            rawuuid: rawUuid,
+            total_count: orders.total_count,
+            page_count: orders.page_count,
+            page: orders.page,
+            variants_id: variant.id,
+            product_id: variant.product_id,
+            name: variant.name,
+            sku: variant.sku,
+            price: parseFloat(variant.price),
+            inventory_quantity: variant.inventory_quantity,
+            inventory_management: variant.inventory_management
+          }
+        );
+      }
 
       if (!formatted) continue;
 
@@ -317,7 +344,6 @@ async function processOrders(data, rawUuid, store) {
       console.log('Prepared SMF for RMQ:', smf);
 
       rmqTasks.push(sendToRMQ(formattedUuid, rawUuid, smf, store));
-
 
     } catch (err) {
       const failRes = buildFailure();
