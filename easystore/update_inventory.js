@@ -160,10 +160,11 @@ async function fetchOrders(store,page) {
       },
       params: {
         page: page,
-        limit:5
+        limit:5,
+        visibility:'published'
       }
     });
-    // logger.downstream.info(`Fetched orders from EasyStore ${store.name}: ${JSON.stringify(response.data)}`);
+    logger.downstream.info(`Fetched orders from EasyStore ${store.name}: ${JSON.stringify(response.data)}`);
     return response.data;
   } catch (error) {
     console.error('[EasyStore] API Error:', error.response?.data || error.message);
